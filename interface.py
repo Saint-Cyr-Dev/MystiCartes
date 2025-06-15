@@ -1,134 +1,157 @@
 import customtkinter as ctk
-from tkinter import simpledialog, messagebox
+from tkinter import messagebox
 from PIL import Image
-from jeu_cartes import JeuCartes 
+import threading
+import time
+import os
 
 class InterfaceJeu(ctk.CTk):
-    def __init__(self):
+    def __init__(self, jeu):
         super().__init__()
-        self.geometry("900x700")
+        self.geometry("900x600")
         self.title("MystiCartes")
-        self.jeu = JeuCartes()
 
-        # Chargement des images
+        self.jeu = jeu
         self.images_cartes = {}
-        for i in range(1, 16):
-            try:
-                img = Image.open(f"images/img{i}.png").resize((80, 120))
-                self.images_cartes[i] = ctk.CTkImage(light_image=img, dark_image=img, size=(80, 120))
-            except Exception as e:
-                print(f"Erreur de chargement image {i} :", e)
 
-        self.btn_noms = ctk.CTkButton(self, text="Entrer les noms des joueurs", command=self.demander_noms)
-        self.btn_noms.pack(pady=10)
+        self.cartes_a_jouer = 1  # cartes à jouer ce tour
+        self.dernier_rejoue = False
 
-        self.btn_regles = ctk.CTkButton(self, text="Afficher les règles", command=self.show_rules)
-        self.btn_regles.pack(pady=10)
+        self.bg_image = ctk.CTkImage(Image.open("images/background.png"), size=(1920, 1080))
+        self.bg_label = ctk.CTkLabel(self, image=self.bg_image, text="")
+        self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
 
-        self.btn_piocher = ctk.CTkButton(self, text="Piocher une carte", command=self.piocher_carte, state="disabled")
-        self.btn_piocher.pack(pady=10)
+        self.label_j1 = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=22, weight="bold"))
+        self.label_j1.place(relx=0.5, y=30, anchor="n")
 
-        self.label_pv = ctk.CTkLabel(self, text="")
-        self.label_pv.pack(pady=10)
+        self.label_j2 = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=22, weight="bold"))
+        self.label_j2.place(relx=0.5, rely=1.0, y=-50, anchor="s")
 
-        self.frame_main_j1 = ctk.CTkFrame(self)
-        self.frame_main_j1.pack(pady=10)
+        self.label_tour = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=24, weight="bold"))
+        self.label_tour.place(relx=0.5, rely=0.5, anchor="center")
 
-        self.frame_main_j2 = ctk.CTkFrame(self)
-        self.frame_main_j2.pack(pady=10)
+        self.frame_main_j1 = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_main_j1.place(relx=0.5, y=80, anchor="n")
 
-    def demander_noms(self):
-        j1 = simpledialog.askstring("Nom du joueur 1", "Entrez le nom du joueur 1 :", parent=self)
-        j2 = simpledialog.askstring("Nom du joueur 2", "Entrez le nom du joueur 2 :", parent=self)
+        self.frame_main_j2 = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_main_j2.place(relx=0.5, rely=1.0, y=-100, anchor="s")
 
-        if j1 and j2:
-            self.jeu.init_joueurs(j1, j2)
-            self.btn_noms.pack_forget()
-            self.btn_piocher.configure(state="normal")
+        # Dé agrandi
+        dice_img_raw = Image.open("images/dice.png")
+        self.dice_img = ctk.CTkImage(dice_img_raw, size=(160, 240))
+        self.btn_dice = ctk.CTkButton(
+            self,
+            image=self.dice_img,
+            text="",
+            width=160,
+            height=240,
+            hover_color="gray",
+            command=self.piocher_carte
+        )
+
+        self.btn_dice.place(relx=0.82, rely=0.5, anchor="center")
+        self.btn_dice.configure(state="disabled")
+
+        self.mettre_a_jour()
+
+    def mettre_a_jour(self):
+        self.label_j1.configure(text=f"{self.jeu.j1_nom} - PV : {self.jeu.pv_j1}")
+        self.label_j2.configure(text=f"{self.jeu.j2_nom} - PV : {self.jeu.pv_j2}")
+
+        if self.jeu.doit_sauter_tour():
+            self.afficher_message("Tour sauté !")
+            self.jeu.tour_j1 = not self.jeu.tour_j1
+
+        joueur_actif = self.jeu.j1_nom if self.jeu.tour_j1 else self.jeu.j2_nom
+        self.label_tour.configure(text=f"Tour de {joueur_actif}")
+
+        self.afficher_main(self.frame_main_j1, self.jeu.main_j1, actif=self.jeu.tour_j1)
+        self.afficher_main(self.frame_main_j2, self.jeu.main_j2, actif=not self.jeu.tour_j1)
+
+        self.btn_dice.configure(state="normal" if self.jeu.peut_piocher() else "disabled")
+
+        if not self.dernier_rejoue:
+            self.cartes_a_jouer = self.jeu.nombre_cartes_a_jouer()
+        self.dernier_rejoue = False
+
+    def afficher_main(self, frame, main, actif):
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+        for idx, carte in enumerate(main):
+            img = self.get_image_carte(carte)
+            btn = ctk.CTkButton(
+                frame,
+                image=img,
+                text=f"" if img else f"Carte {carte}",
+                width=160,
+                height=240,
+                compound="top",
+                fg_color="transparent",
+                state="normal" if actif else "disabled",
+                command=lambda c=carte: self.jouer_carte(c)
+            )
+            btn.grid(row=0, column=idx, padx=5)
+
+    def get_image_carte(self, carte):
+        if carte not in self.images_cartes:
+            chemin = f"images/cartes/carte{carte}.png"
+            if os.path.exists(chemin):
+                img = Image.open(chemin)
+                taille = (160, 240)
+                # Crée une image CustomTkinter avec taille explicitement passée
+                self.images_cartes[carte] = ctk.CTkImage(img, size=taille)
+            else:
+                self.images_cartes[carte] = None
+        return self.images_cartes[carte]
+
+
+    def jouer_carte(self, carte):
+        main = self.jeu.main_j1 if self.jeu.tour_j1 else self.jeu.main_j2
+
+        if carte in main:
+            self.jeu.jouer_carte(main, carte)
+            texte = self.jeu.effet_carte(1 if self.jeu.tour_j1 else 2, carte)
+            self.afficher_message(texte)
+
+            if carte == 5:
+                self.dernier_rejoue = True
+                self.cartes_a_jouer = 1
+            else:
+                self.cartes_a_jouer -= 1
+
+            if self.cartes_a_jouer <= 0 and not self.dernier_rejoue:
+                self.jeu.tour_j1 = not self.jeu.tour_j1
+                self.cartes_a_jouer = 1
+
             self.mettre_a_jour()
-        else:
-            messagebox.showwarning("Erreur", "Veuillez entrer les deux noms.")
-
-    def show_rules(self):
-        txt = "\n".join([
-            "1: Attaque (-10 PV à l'adversaire)",
-            "2: Soin (+10 PV à soi-même)",
-            "3: Interdiction de soin (1 tour)",
-            "4: Saut de tour pour l'adversaire",
-            "5: Rejouer immédiatement",
-            "6: Bombe surprise (-10 PV à tous)",
-            "7: Échange de points de vie",
-            "8: Combo (jouer 2 cartes au prochain tour)",
-            "9: Vol de vie (+15 PV, -15 PV adversaire)",
-            "10: Vision (voir la main adverse 1 tour)",
-            "11: Bouclier (bloque le prochain dégât)",
-            "12: Coup critique (-30 PV)",
-            "13: Poison (5 PV/tour pendant 3 tours)",
-            "14: Copier une carte de l'adversaire",
-            "15: Purification (retire malus et poison)",
-            "Main max 4 cartes. Tour par tour. Combos autorisés."
-        ])
-        messagebox.showinfo("Règles du jeu", txt)
 
     def piocher_carte(self):
         main = self.jeu.main_j1 if self.jeu.tour_j1 else self.jeu.main_j2
         if self.jeu.piocher_carte(main):
+            self.vibrer_de()
             self.mettre_a_jour()
         else:
-            messagebox.showinfo("Info", "Impossible de piocher : main pleine ou paquet vide.")
+            self.afficher_message("Impossible de piocher.")
 
-    def jouer_carte(self, carte):
-        joueur = 1 if self.jeu.tour_j1 else 2
-        main = self.jeu.main_j1 if joueur == 1 else self.jeu.main_j2
+    def vibrer_de(self):
+        def vib():
+            for _ in range(4):
+                self.btn_dice.place_configure(relx=0.945)
+                time.sleep(0.05)
+                self.btn_dice.place_configure(relx=0.955)
+                time.sleep(0.05)
+            self.btn_dice.place_configure(relx=0.95)
 
-        if carte in main:
-            self.jeu.jouer_carte(main, carte)
-            effet = self.jeu.effet_carte(joueur, carte)
-            messagebox.showinfo("Effet de la carte", effet)
+        threading.Thread(target=vib).start()
 
-            # Vérifie si un joueur a perdu
-            if self.jeu.pv_j1 <= 0 or self.jeu.pv_j2 <= 0:
-                perdant = self.jeu.j1_nom if self.jeu.pv_j1 <= 0 else self.jeu.j2_nom
-                gagnant = self.jeu.j2_nom if perdant == self.jeu.j1_nom else self.jeu.j1_nom
-                messagebox.showinfo("Fin de partie", f"{perdant} a perdu ! {gagnant} remporte la partie 🎉")
-                self.btn_piocher.configure(state="disabled")
-                return  # Arrête ici
-
-            if carte != 5:  # Si ce n'est pas une carte qui permet de rejouer
-                self.jeu.tour_j1 = not self.jeu.tour_j1
-
-            self.mettre_a_jour()
-
-
-    def mettre_a_jour(self):
-        self.label_pv.configure(
-            text=f"{self.jeu.j1_nom}: {self.jeu.pv_j1} PV | {self.jeu.j2_nom}: {self.jeu.pv_j2} PV\n"
-                 f"Tour de {'Joueur 1' if self.jeu.tour_j1 else 'Joueur 2'}")
-        self.afficher_mains()
-
-    def afficher_mains(self):
-        for widget in self.frame_main_j1.winfo_children():
-            widget.destroy()
-        for widget in self.frame_main_j2.winfo_children():
-            widget.destroy()
-
-        # Afficher main joueur 1
-        for idx, carte in enumerate(self.jeu.main_j1):
-            image = self.images_cartes.get(carte)
-            btn = ctk.CTkButton(self.frame_main_j1, image=image, text="", width=80, height=120,
-                                state="normal" if self.jeu.tour_j1 else "disabled",
-                                command=lambda c=carte: self.jouer_carte(c))
-            btn.grid(row=0, column=idx, padx=5)
-
-        # Afficher main joueur 2
-        for idx, carte in enumerate(self.jeu.main_j2):
-            image = self.images_cartes.get(carte)
-            btn = ctk.CTkButton(self.frame_main_j2, image=image, text="", width=80, height=120,
-                                state="normal" if not self.jeu.tour_j1 else "disabled",
-                                command=lambda c=carte: self.jouer_carte(c))
-            btn.grid(row=0, column=idx, padx=5)
+    def afficher_message(self, texte):
+        messagebox.showinfo("Action", texte)
 
 
 if __name__ == "__main__":
-    app = InterfaceJeu()
+    from jeu_cartes import JeuCartes
+    jeu = JeuCartes()
+    jeu.init_joueurs("Alice", "Bob")
+    app = InterfaceJeu(jeu)
     app.mainloop()

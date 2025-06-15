@@ -22,24 +22,10 @@ class JeuCartes:
         self.poison_j2 = 0
 
     def init_joueurs(self, j1, j2):
+        self.__init__()
         self.j1_nom = j1
         self.j2_nom = j2
-        self.pv_j1 = 100
-        self.pv_j2 = 100
-        self.tour_j1 = True
-        self.main_j1 = []
-        self.main_j2 = []
-        self.paquet = list(range(1, 16)) * 4
         random.shuffle(self.paquet)
-
-        self.saut_j1 = False
-        self.saut_j2 = False
-        self.combo_j1 = 0
-        self.combo_j2 = 0
-        self.bouclier_j1 = False
-        self.bouclier_j2 = False
-        self.poison_j1 = 0
-        self.poison_j2 = 0
 
     def piocher_carte(self, main):
         if not self.paquet or len(main) >= 4:
@@ -47,6 +33,10 @@ class JeuCartes:
         carte = self.paquet.pop()
         main.append(carte)
         return True
+
+    def peut_piocher(self):
+        main = self.main_j1 if self.tour_j1 else self.main_j2
+        return len(main) < 4 and bool(self.paquet)
 
     def jouer_carte(self, main, carte):
         if carte in main:
@@ -105,9 +95,9 @@ class JeuCartes:
 
         elif carte == 4:
             if joueur == 1:
-                self.saut_j2 = True
+                self.saut_j2 = "tour"
             else:
-                self.saut_j1 = True
+                self.saut_j1 = "tour"
             texte = f"{nom} fait sauter un tour à {adv_nom} !"
 
         elif carte == 5:
@@ -166,7 +156,7 @@ class JeuCartes:
                 self.poison_j2 = 3
             else:
                 self.poison_j1 = 3
-            texte = f"{nom} empoisonne {adv_nom} (5 PV par tour pendant 3 tours)"
+            texte = f"{nom} empoisonne {adv_nom} (5 PV/tour pendant 3 tours)"
 
         elif carte == 14:
             if adv_main:
@@ -194,3 +184,21 @@ class JeuCartes:
             return texte + f"\n{self.j1_nom} remporte la partie !"
 
         return texte
+
+    def doit_sauter_tour(self):
+        if self.tour_j1 and self.saut_j1 == "tour":
+            self.saut_j1 = False
+            return True
+        elif not self.tour_j1 and self.saut_j2 == "tour":
+            self.saut_j2 = False
+            return True
+        return False
+
+    def nombre_cartes_a_jouer(self):
+        if self.tour_j1 and self.combo_j1 > 0:
+            self.combo_j1 -= 1
+            return 2
+        elif not self.tour_j1 and self.combo_j2 > 0:
+            self.combo_j2 -= 1
+            return 2
+        return 1
