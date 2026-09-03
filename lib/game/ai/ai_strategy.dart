@@ -21,6 +21,14 @@ abstract interface class DuelAiStrategy {
   AiDifficulty get difficulty;
 
   DuelAiTurnResult playTurn(DuelState state);
+
+  DuelActionResult? playMainMonster(DuelState state);
+
+  DuelActionResult? setBackrow(DuelState state);
+
+  AttackDeclarationResult? declareAttack(DuelState state);
+
+  DuelActionResult? discardExcessHand(DuelState state);
 }
 
 /// Point d'entrée unique utilisé par l'écran de combat pour les quatre
@@ -67,6 +75,22 @@ final class _BeginnerStrategy implements DuelAiStrategy {
     final result = ai.playUnopposedTurn(state);
     return DuelAiTurnResult(state: result.state, actions: result.actions);
   }
+
+  @override
+  DuelActionResult? playMainMonster(DuelState state) =>
+      ai.playRandomMonster(state);
+
+  @override
+  DuelActionResult? setBackrow(DuelState state) =>
+      ai.setRandomActionOrTrap(state);
+
+  @override
+  AttackDeclarationResult? declareAttack(DuelState state) =>
+      ai.declareRandomAttack(state);
+
+  @override
+  DuelActionResult? discardExcessHand(DuelState state) =>
+      ai.discardExcessHand(state);
 }
 
 final class _IntermediateStrategy implements DuelAiStrategy {
@@ -81,6 +105,22 @@ final class _IntermediateStrategy implements DuelAiStrategy {
     final result = ai.playUnopposedTurn(state);
     return DuelAiTurnResult(state: result.state, actions: result.actions);
   }
+
+  @override
+  DuelActionResult? playMainMonster(DuelState state) =>
+      ai.playBestMonster(state);
+
+  @override
+  DuelActionResult? setBackrow(DuelState state) =>
+      ai.setUsefulActionOrTrap(state);
+
+  @override
+  AttackDeclarationResult? declareAttack(DuelState state) =>
+      ai.declareBestAttack(state);
+
+  @override
+  DuelActionResult? discardExcessHand(DuelState state) =>
+      ai.discardExcessHand(state);
 }
 
 final class _AdvancedStrategy implements DuelAiStrategy {
@@ -95,6 +135,22 @@ final class _AdvancedStrategy implements DuelAiStrategy {
     final result = ai.playUnopposedTurn(state);
     return DuelAiTurnResult(state: result.state, actions: result.actions);
   }
+
+  @override
+  DuelActionResult? playMainMonster(DuelState state) =>
+      ai.playBestMonster(state);
+
+  @override
+  DuelActionResult? setBackrow(DuelState state) =>
+      ai.setStrategicBackrow(state);
+
+  @override
+  AttackDeclarationResult? declareAttack(DuelState state) =>
+      ai.declareBestAttack(state);
+
+  @override
+  DuelActionResult? discardExcessHand(DuelState state) =>
+      ai.discardExcessHand(state);
 }
 
 final class _ExpertStrategy implements DuelAiStrategy {
@@ -109,4 +165,20 @@ final class _ExpertStrategy implements DuelAiStrategy {
     final result = ai.playUnopposedTurn(state);
     return DuelAiTurnResult(state: result.state, actions: result.actions);
   }
+
+  @override
+  DuelActionResult? playMainMonster(DuelState state) =>
+      ai.playBestMonster(state);
+
+  @override
+  DuelActionResult? setBackrow(DuelState state) =>
+      ai.setStrategicBackrow(state);
+
+  @override
+  AttackDeclarationResult? declareAttack(DuelState state) =>
+      ai.declareNextAttack(state);
+
+  @override
+  DuelActionResult? discardExcessHand(DuelState state) =>
+      ai.discardExcessHand(state);
 }

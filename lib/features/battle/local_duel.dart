@@ -92,6 +92,20 @@ final class LocalDuelActionResult {
   final String message;
 }
 
+final class LocalChainResponseOption {
+  const LocalChainResponseOption({
+    required this.card,
+    required this.label,
+    this.requiresTarget = false,
+    this.requiresDiscard = false,
+  });
+
+  final CardInstance card;
+  final String label;
+  final bool requiresTarget;
+  final bool requiresDiscard;
+}
+
 /// Adaptateur local entre l'écran Flutter et le moteur Dart pur V2.
 ///
 /// Aucun accès réseau n'est effectué pendant le duel. Le petit deck fourni ici
@@ -104,6 +118,20 @@ final class LocalDuelController {
     required this.presentations,
     required this.state,
   });
+
+  /// Point d'injection destiné aux tests de l'adaptateur UI/moteur.
+  factory LocalDuelController.forTesting({
+    required DuelEngine engine,
+    required DuelAiStrategy ai,
+    required Map<String, LocalCardPresentation> presentations,
+    required DuelState state,
+  }) =>
+      LocalDuelController._(
+        engine: engine,
+        ai: ai,
+        presentations: presentations,
+        state: state,
+      );
 
   factory LocalDuelController.create({
     int? seed,
@@ -160,7 +188,18 @@ final class LocalDuelController {
   final Map<String, LocalCardPresentation> presentations;
   DuelState state;
   int _linkSerial = 0;
+  AttackDeclaration? _pendingAiAttack;
+  int _aiMainActionsTurn = -1;
+  bool _aiMonsterActionDone = false;
+  bool _aiBackrowActionDone = false;
   List<String> lastChainEvents = const [];
+
+  bool get awaitingPlayerPriority =>
+      state.chain.isOpen &&
+      state.chain.priorityPlayer == DuelParticipant.player &&
+      !state.isFinished;
+
+  AttackDeclaration? get pendingAiAttack => _pendingAiAttack;
 
   LocalCardPresentation presentationOf(FieldCardInstance card) {
     if (card is CardInstance) return presentations[card.cardCode]!;
@@ -211,6 +250,7 @@ final class LocalDuelController {
     required String cardInstanceId,
     String? targetInstanceId,
     Map<String, Object?> payload = const {},
+    bool resolveImmediately = true,
   }) {
     final source = _findPlayerCard(cardInstanceId);
     if (source == null || source.effectKey == null) {
@@ -244,8 +284,121 @@ final class LocalDuelController {
     );
     if (!result.succeeded) return _failure(result.failure);
     lastChainEvents = ['Activation : ${presentationOf(source).name}'];
-    state = _settleWindow(result.state, recordResolution: true);
-    return const LocalDuelActionResult(true, 'Effet activé et Chaîne résolue.');
+    state = resolveImmediately
+        ? _settleWindow(result.state, recordResolution: true)
+        : result.state;
+    if (!resolveImmediately &&
+        state.chain.priorityPlayer == DuelParticipant.ai) {
+      final aiPass = engine.passPriority(
+        state: state,
+        participant: DuelParticipant.ai,
+      );
+      if (aiPass.succeeded) state = aiPass.state;
+    }
+    return LocalDuelActionResult(
+      true,
+      resolveImmediately
+          ? 'Effet activé et Chaîne résolue.'
+          : 'Effet ajouté à la Chaîne.',
+    );
+  }
+
+  List<LocalChainResponseOption> availablePlayerResponses() {
+    if (!awaitingPlayerPriority) return const [];
+    final options = <LocalChainResponseOption>[];
+    final backrow = state.playerField.actionTrapZones
+        .whereType<CardInstance>()
+        .where((card) => card.effectKey != null);
+    for (final card in backrow) {
+      switch (card.cardCode) {
+        case 'BAB-008':
+          if (state.playerField.characterZones
+              .whereType<CardInstance>()
+              .any((target) => target.hasFamily('babi'))) {
+            options.add(LocalChainResponseOption(
+              card: card,
+              label: 'Trajet Express — changer une position',
+              requiresTarget: true,
+            ));
+          }
+        case 'BAB-011':
+          if (_pendingAiAttack != null) {
+            options.add(LocalChainResponseOption(
+              card: card,
+              label: 'Feu Rouge Mystique — annuler l’attaque',
+            ));
+          }
+        case 'BAB-012':
+          final lastLink = state.chain.links.lastOrNull;
+          final sourceCategory = lastLink?.sourceCardCode == null
+              ? null
+              : presentations[lastLink!.sourceCardCode!]?.category;
+          if (lastLink != null &&
+              sourceCategory == CardCategory.action &&
+              state.playerField.hand.isNotEmpty) {
+            options.add(LocalChainResponseOption(
+              card: card,
+              label: 'Coupure de Courant — annuler l’Action',
+              requiresDiscard: true,
+            ));
+          }
+      }
+    }
+    return options;
+  }
+
+  LocalDuelActionResult activatePlayerResponse({
+    required LocalChainResponseOption option,
+    String? targetInstanceId,
+    String? discardInstanceId,
+  }) {
+    if (!awaitingPlayerPriority) {
+      return const LocalDuelActionResult(false, 'Vous n’avez pas la priorité.');
+    }
+    final payload = <String, Object?>{};
+    if (option.card.cardCode == 'BAB-011') {
+      final attack = _pendingAiAttack;
+      if (attack == null) {
+        return const LocalDuelActionResult(false, 'Aucune attaque à annuler.');
+      }
+      payload.addAll({
+        'trigger': 'attack_declared',
+        'attack_declaration_id': attack.declarationId,
+        'attacker_instance_id': attack.attackerInstanceId,
+      });
+    } else if (option.card.cardCode == 'BAB-012') {
+      final targetLink = state.chain.links.lastOrNull;
+      if (targetLink == null || discardInstanceId == null) {
+        return const LocalDuelActionResult(
+          false,
+          'Choisissez une carte à défausser.',
+        );
+      }
+      payload.addAll({
+        'target_link_id': targetLink.linkId,
+        'discard_instance_id': discardInstanceId,
+      });
+    }
+    return activateEffect(
+      cardInstanceId: option.card.instanceId,
+      targetInstanceId: targetInstanceId,
+      payload: payload,
+      resolveImmediately: false,
+    );
+  }
+
+  LocalDuelActionResult passPlayerPriority() {
+    if (!awaitingPlayerPriority) {
+      return const LocalDuelActionResult(false, 'Vous n’avez pas la priorité.');
+    }
+    final result = engine.passPriority(
+      state: state,
+      participant: DuelParticipant.player,
+    );
+    if (!result.succeeded) return _failure(result.failure);
+    _recordPassResolution(result);
+    state = result.state;
+    return const LocalDuelActionResult(true, 'Priorité passée.');
   }
 
   LocalDuelActionResult attack({
@@ -309,6 +462,124 @@ final class LocalDuelController {
     final result = ai.playTurn(state);
     state = result.state;
     return result.actions;
+  }
+
+  /// Joue l'IA jusqu'à la prochaine décision du joueur. Contrairement à
+  /// [playAiTurn], cette méthode ne ferme jamais une priorité appartenant au
+  /// joueur et permet donc à l'interface d'afficher ses réponses de Chaîne.
+  List<String> playAiUntilPlayerDecision() {
+    final actions = <String>[];
+    var guard = 0;
+    while (!state.isFinished &&
+        state.activePlayer == DuelParticipant.ai &&
+        guard++ < 120) {
+      if (state.chain.isOpen) {
+        if (state.chain.priorityPlayer == DuelParticipant.player) break;
+        final passed = engine.passPriority(
+          state: state,
+          participant: DuelParticipant.ai,
+        );
+        if (!passed.succeeded) break;
+        _recordPassResolution(passed);
+        state = passed.state;
+        continue;
+      }
+
+      if (_pendingAiAttack != null) {
+        final combat = engine.resolveAttack(
+          state: state,
+          declaration: _pendingAiAttack!,
+        );
+        state = combat.state;
+        actions.add(
+          combat.status == CombatResolutionStatus.cancelled
+              ? 'attaque_annulée'
+              : 'attaque',
+        );
+        _pendingAiAttack = null;
+        continue;
+      }
+
+      if (state.currentPhase == DuelPhase.draw ||
+          state.currentPhase == DuelPhase.preparation) {
+        final advanced = engine.advancePhase(state);
+        if (!advanced.succeeded) break;
+        state = advanced.state;
+        continue;
+      }
+
+      if (state.currentPhase == DuelPhase.main1) {
+        if (_aiMainActionsTurn != state.turnNumber) {
+          _aiMainActionsTurn = state.turnNumber;
+          _aiMonsterActionDone = false;
+          _aiBackrowActionDone = false;
+        }
+        if (!_aiMonsterActionDone) {
+          _aiMonsterActionDone = true;
+          final monster = ai.playMainMonster(state);
+          if (monster != null && monster.succeeded) {
+            state = monster.state;
+            actions.add('personnage_joué');
+            continue;
+          }
+        }
+        if (!_aiBackrowActionDone) {
+          _aiBackrowActionDone = true;
+          final support = ai.setBackrow(state);
+          if (support != null && support.succeeded) {
+            state = support.state;
+            actions.add('carte_posée');
+            continue;
+          }
+        }
+        final advanced = engine.advancePhase(state);
+        if (!advanced.succeeded) break;
+        state = advanced.state;
+        continue;
+      }
+
+      if (state.currentPhase == DuelPhase.battle) {
+        final attack = ai.declareAttack(state);
+        if (attack != null && attack.succeeded) {
+          state = attack.state;
+          _pendingAiAttack = attack.declaration;
+          actions.add('attaque_déclarée');
+          continue;
+        }
+        final advanced = engine.advancePhase(state);
+        if (!advanced.succeeded) break;
+        state = advanced.state;
+        continue;
+      }
+
+      if (state.currentPhase == DuelPhase.main2) {
+        final advanced = engine.advancePhase(state);
+        if (!advanced.succeeded) break;
+        state = advanced.state;
+        continue;
+      }
+
+      if (state.currentPhase == DuelPhase.end) {
+        final discard = ai.discardExcessHand(state);
+        if (discard != null && discard.succeeded) {
+          state = discard.state;
+          actions.add('défausse');
+        }
+        final advanced = engine.advancePhase(state);
+        if (!advanced.succeeded) break;
+        state = advanced.state;
+      }
+    }
+    return actions;
+  }
+
+  void _recordPassResolution(PriorityPassResult result) {
+    if (!result.resolutionTriggered) return;
+    lastChainEvents = [
+      ...lastChainEvents,
+      for (final id in result.resolvedLinkIds) 'Résolu : $id',
+      for (final id in result.fizzledLinkIds) 'Annulé : $id',
+    ];
   }
 
   DuelState _settleWindow(

@@ -295,6 +295,14 @@ final class ExpertAi {
           );
   }
 
+  /// Expose les choix de support de la couche avancée au pilote de tour
+  /// interactif. La légalité reste entièrement vérifiée par le moteur.
+  DuelActionResult? setStrategicBackrow(DuelState state) =>
+      _advanced.setStrategicBackrow(state);
+
+  DuelActionResult? discardExcessHand(DuelState state) =>
+      _advanced.discardExcessHand(state);
+
   ExpertAttackPlan planAttackSequence(DuelState initialState) {
     if (initialState.isFinished ||
         initialState.activePlayer != participant ||

@@ -385,17 +385,106 @@ class _BattleScreenState extends State<BattleScreen> {
     _checkEnd();
     if (_duel.state.activePlayer == DuelParticipant.ai &&
         !_duel.state.isFinished) {
-      setState(() => _aiPlaying = true);
-      await Future<void>.delayed(const Duration(milliseconds: 650));
-      final actions = _duel.playAiTurn();
-      if (!mounted) return;
-      setState(() => _aiPlaying = false);
+      await _runAiUntilDecision();
+    }
+  }
+
+  Future<void> _runAiUntilDecision() async {
+    if (!mounted ||
+        _duel.state.isFinished ||
+        _duel.state.activePlayer != DuelParticipant.ai) {
+      return;
+    }
+    setState(() => _aiPlaying = true);
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    final actions = _duel.playAiUntilPlayerDecision();
+    if (!mounted) return;
+    setState(() => _aiPlaying = false);
+    _checkEnd();
+    if (_duel.state.isFinished) return;
+
+    if (_duel.awaitingPlayerPriority) {
+      await _showChainDecision();
+      if (!mounted || _duel.state.isFinished) return;
+      await _runAiUntilDecision();
+      return;
+    }
+
+    if (_duel.state.activePlayer == DuelParticipant.player) {
       _message(
         actions.isEmpty
             ? "L'IA termine son tour."
-            : "Tour IA : ${actions.length} action${actions.length > 1 ? 's' : ''}.",
+            : "Tour IA terminé · ${actions.length} action${actions.length > 1 ? 's' : ''}.",
       );
+    }
+  }
+
+  Future<void> _showChainDecision() async {
+    while (mounted && _duel.awaitingPlayerPriority) {
+      final options = _duel.availablePlayerResponses();
+      if (!mounted) return;
+      final choice = await showDialog<Object>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          icon: const Icon(Icons.link, size: 42),
+          title: const Text('Fenêtre de réponse'),
+          content: Text(
+            _duel.pendingAiAttack == null
+                ? "L'IA vient d'effectuer une action. Vous avez la priorité."
+                : "L'IA déclare une attaque. Activez une réponse ou passez.",
+          ),
+          actions: [
+            for (var index = 0; index < options.length; index++)
+              TextButton(
+                onPressed: () => Navigator.pop(context, index),
+                child: Text(options[index].label),
+              ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, 'pass'),
+              child: const Text('Passer'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+
+      if (choice == 'pass') {
+        final result = _duel.passPlayerPriority();
+        setState(() {});
+        if (!result.succeeded) _message(result.message);
+        return;
+      }
+      if (choice is! int || choice < 0 || choice >= options.length) continue;
+
+      final option = options[choice];
+      String? targetId;
+      String? discardId;
+      if (option.requiresTarget) {
+        targetId = await _chooseCard(
+          'Choisissez un Personnage Babi',
+          _duel.state.playerField.characterZones
+              .whereType<CardInstance>()
+              .where((card) => card.hasFamily('babi')),
+        );
+        if (targetId == null) continue;
+      }
+      if (option.requiresDiscard) {
+        discardId = await _chooseCard(
+          'Choisissez une carte à défausser',
+          _duel.state.playerField.hand,
+        );
+        if (discardId == null) continue;
+      }
+      final result = _duel.activatePlayerResponse(
+        option: option,
+        targetInstanceId: targetId,
+        discardInstanceId: discardId,
+      );
+      setState(() {});
+      _message(result.message);
       _checkEnd();
+      if (!result.succeeded) continue;
     }
   }
 
