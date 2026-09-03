@@ -81,7 +81,9 @@ class MystiCartesApp extends StatelessWidget {
         AppRoutes.decks => localDemoMode
             ? const _OnlineFeatureScreen(feature: 'Mes decks')
             : const DecksScreen(),
-        AppRoutes.battle => const BattleLaunchScreen(),
+        AppRoutes.battle => localDemoMode
+            ? const BattleScreen.local()
+            : const BattleLaunchScreen(),
         AppRoutes.settings => const SettingsScreen(),
         _ => localDemoMode
             ? const HomeScreen(localDemoMode: true)

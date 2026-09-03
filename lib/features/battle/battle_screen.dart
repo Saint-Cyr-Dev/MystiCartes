@@ -145,12 +145,184 @@ class _BattleScreenState extends State<BattleScreen> {
 
     if (card.category == CardCategory.action ||
         card.category == CardCategory.trap) {
+      if (card.category == CardCategory.action) {
+        final choice = await showModalBottomSheet<String>(
+          context: context,
+          builder: (context) => SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _duel.presentationOf(card).name,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    onPressed: () => Navigator.pop(context, 'activate'),
+                    icon: const Icon(Icons.bolt),
+                    label: const Text('Activer maintenant'),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => Navigator.pop(context, 'set'),
+                    icon: const Icon(Icons.visibility_off),
+                    label: const Text('Poser face cachée'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        if (choice == 'activate') {
+          await _activateEffectCard(card);
+          return;
+        }
+        if (choice != 'set') return;
+      }
       final result = _duel.setActionOrTrap(card.instanceId);
       setState(() {});
       _message(result.message);
       return;
     }
-    _message('Cette catégorie sera jouable dans une prochaine interface.');
+    if (card.category == CardCategory.terrain ||
+        card.category == CardCategory.relic) {
+      await _activateEffectCard(card);
+      return;
+    }
+    _message('Cette carte ne peut pas être jouée directement depuis la main.');
+  }
+
+  Future<void> _activateEffectCard(CardInstance card) async {
+    String? targetId;
+    var payload = <String, Object?>{};
+    switch (card.cardCode) {
+      case 'BAB-008':
+        targetId = await _chooseCard(
+          'Choisissez un Personnage Babi',
+          _duel.state.playerField.characterZones
+              .whereType<CardInstance>()
+              .where(
+                (candidate) => candidate.hasFamily('babi'),
+              ),
+        );
+        if (targetId == null) return;
+      case 'BAB-009':
+        targetId = await _chooseCard(
+          'Choisissez une carte adverse posée',
+          _duel.state.aiField.actionTrapZones
+              .whereType<CardInstance>()
+              .where((candidate) => !candidate.faceUp),
+        );
+        if (targetId == null) return;
+      case 'BAB-010':
+        final characters =
+            _duel.state.playerField.characterZones.whereType<CardInstance>();
+        final messenger = characters
+            .where((candidate) => candidate.cardCode == 'BAB-002')
+            .firstOrNull;
+        final champion = characters
+            .where((candidate) => candidate.cardCode == 'BAB-006')
+            .firstOrNull;
+        if (messenger == null || champion == null) {
+          _message('Messagère Wôrô-Wôrô et Champion du Bitume sont requis.');
+          return;
+        }
+        payload = {
+          'material_instance_ids': [
+            messenger.instanceId,
+            champion.instanceId,
+          ],
+        };
+      case 'BAB-013':
+        break;
+      case 'BAB-014':
+        targetId = await _chooseCard(
+          'Équiper quel Personnage Babi ?',
+          _duel.state.playerField.characterZones
+              .whereType<CardInstance>()
+              .where(
+                (candidate) => candidate.hasFamily('babi'),
+              ),
+        );
+        if (targetId == null) return;
+        payload = {'mode': 'equip'};
+      default:
+        break;
+    }
+    final result = _duel.activateEffect(
+      cardInstanceId: card.instanceId,
+      targetInstanceId: targetId,
+      payload: payload,
+    );
+    if (!mounted) return;
+    setState(() {});
+    _message(result.message);
+    _checkEnd();
+  }
+
+  Future<String?> _chooseCard(
+    String title,
+    Iterable<CardInstance> candidates,
+  ) async {
+    final choices = candidates.toList(growable: false);
+    if (choices.isEmpty) {
+      _message('Aucune cible valide.');
+      return null;
+    }
+    return showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text(title),
+        children: [
+          for (final card in choices)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, card.instanceId),
+              child: Text(_duel.presentationOf(card).name),
+            ),
+        ],
+      ),
+    );
+  }
+
+  void _showCards(String title, List<CardInstance> cards) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(title, style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 12),
+              if (cards.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text('Aucune carte.'),
+                )
+              else
+                Flexible(
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: cards.length,
+                    itemBuilder: (context, index) {
+                      final card = cards[index];
+                      return ListTile(
+                        leading: Icon(
+                            card.faceUp ? Icons.style : Icons.visibility_off),
+                        title: Text(_duel.presentationOf(card).name),
+                        subtitle: Text(card.cardCode),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _tapOwnCharacter(FieldCardInstance card) {
@@ -405,6 +577,12 @@ class _BattleScreenState extends State<BattleScreen> {
                             opponent: true,
                             controller: _duel,
                             onCardTap: _tapOpponentCharacter),
+                        const SizedBox(height: 6),
+                        _TerrainSlot(
+                          card: state.aiField.terrainZone,
+                          controller: _duel,
+                          opponent: true,
+                        ),
                         const SizedBox(height: 12),
                         _PhaseBar(
                             phase: state.currentPhase,
@@ -426,7 +604,22 @@ class _BattleScreenState extends State<BattleScreen> {
                         const SizedBox(height: 6),
                         _ZoneRow(
                             zones: state.playerField.actionTrapZones,
-                            controller: _duel),
+                            controller: _duel,
+                            onCardTap: (card) {
+                              if (card is CardInstance) {
+                                _activateEffectCard(card);
+                              }
+                            }),
+                        const SizedBox(height: 6),
+                        _TerrainSlot(
+                          card: state.playerField.terrainZone,
+                          controller: _duel,
+                          onTap: state.playerField.terrainZone == null
+                              ? null
+                              : () => _activateEffectCard(
+                                    state.playerField.terrainZone!,
+                                  ),
+                        ),
                         const SizedBox(height: 8),
                         _PlayerStatus(
                             name: 'Vous',
@@ -443,6 +636,52 @@ class _BattleScreenState extends State<BattleScreen> {
                                   '${_selectedSacrifices.length} sacrifice(s) sélectionné(s)',
                                   style: const TextStyle(
                                       color: Color(0xFFFFD166)))),
+                        Wrap(
+                          alignment: WrapAlignment.center,
+                          spacing: 8,
+                          children: [
+                            TextButton.icon(
+                              onPressed: () => _showCards(
+                                'Votre Cimetière',
+                                state.playerField.graveyard,
+                              ),
+                              icon: const Icon(Icons.auto_delete),
+                              label: Text(
+                                'Cimetière (${state.playerField.graveyard.length})',
+                              ),
+                            ),
+                            TextButton.icon(
+                              onPressed: () => _showCards(
+                                'Réserve des Mythiques',
+                                state.playerField.mythicReserve,
+                              ),
+                              icon: const Icon(Icons.auto_awesome),
+                              label: Text(
+                                'Réserve (${state.playerField.mythicReserve.length})',
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_duel.lastChainEvents.isNotEmpty)
+                          Card(
+                            color: const Color(0xFF34204A),
+                            child: Padding(
+                              padding: const EdgeInsets.all(10),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.link),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _duel.lastChainEvents.join(' → '),
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                         const SizedBox(height: 10),
                         SizedBox(
                           height: 146,
@@ -578,6 +817,49 @@ class _PhaseBar extends StatelessWidget {
         DuelPhase.main2 => 'Principale 2',
         DuelPhase.end => 'Fin'
       };
+}
+
+class _TerrainSlot extends StatelessWidget {
+  const _TerrainSlot({
+    required this.card,
+    required this.controller,
+    this.opponent = false,
+    this.onTap,
+  });
+
+  final CardInstance? card;
+  final LocalDuelController controller;
+  final bool opponent;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Text('Terrain'),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 82,
+            height: 58,
+            child: card == null
+                ? Container(
+                    decoration: BoxDecoration(
+                      color: Colors.green.withValues(alpha: .08),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.greenAccent.shade100),
+                    ),
+                    child: const Icon(Icons.landscape, color: Colors.white38),
+                  )
+                : _DuelCard(
+                    card: card!,
+                    presentation: controller.presentationOf(card!),
+                    compact: true,
+                    hideIdentity: opponent && !card!.faceUp,
+                    onTap: onTap,
+                  ),
+          ),
+        ],
+      );
 }
 
 class _ZoneRow extends StatelessWidget {

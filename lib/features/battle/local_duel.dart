@@ -6,6 +6,7 @@ import '../../game/battle_state.dart';
 import '../../game/card.dart';
 import '../../game/duel_engine.dart';
 import '../../game/duel_types.dart';
+import '../../game/effects/effect_registry.dart';
 import '../../game/player.dart';
 
 final class LocalCardPresentation {
@@ -111,7 +112,7 @@ final class LocalDuelController {
     List<LocalCardPresentation> playerMythicReserve = const [],
   }) {
     final random = Random(seed);
-    final engine = DuelEngine();
+    final engine = DuelEngine(chainEffects: V2EffectRegistry.create());
     final presentations = {
       for (final definition in _definitions) definition.code: definition,
       if (playerDeck != null)
@@ -158,6 +159,8 @@ final class LocalDuelController {
   final DuelAiStrategy ai;
   final Map<String, LocalCardPresentation> presentations;
   DuelState state;
+  int _linkSerial = 0;
+  List<String> lastChainEvents = const [];
 
   LocalCardPresentation presentationOf(FieldCardInstance card) {
     if (card is CardInstance) return presentations[card.cardCode]!;
@@ -202,6 +205,47 @@ final class LocalDuelController {
     if (!result.succeeded) return _failure(result.failure);
     state = _settleWindow(result.state);
     return const LocalDuelActionResult(true, 'Carte posée face cachée.');
+  }
+
+  LocalDuelActionResult activateEffect({
+    required String cardInstanceId,
+    String? targetInstanceId,
+    Map<String, Object?> payload = const {},
+  }) {
+    final source = _findPlayerCard(cardInstanceId);
+    if (source == null || source.effectKey == null) {
+      return const LocalDuelActionResult(
+          false, 'Cette carte n’a aucun effet activable.');
+    }
+    final speed = switch ((source.category, source.subtype)) {
+      (CardCategory.trap, 'counter') => ChainSpeed.speed3,
+      (CardCategory.trap, _) ||
+      (CardCategory.action, 'quick') =>
+        ChainSpeed.speed2,
+      _ => ChainSpeed.speed1,
+    };
+    final link = ChainLink(
+      linkId: 'ui:${source.instanceId}:${state.turnNumber}:${_linkSerial++}',
+      effectKey: source.effectKey!,
+      activatingPlayer: DuelParticipant.player,
+      speed: speed,
+      sourceCardInstanceId: source.instanceId,
+      sourceCardCode: source.cardCode,
+      target: targetInstanceId == null
+          ? null
+          : ChainTarget(cardInstanceId: targetInstanceId),
+      payload: payload,
+    );
+    final result = engine.activateCard(
+      state: state,
+      participant: DuelParticipant.player,
+      cardInstanceId: cardInstanceId,
+      link: link,
+    );
+    if (!result.succeeded) return _failure(result.failure);
+    lastChainEvents = ['Activation : ${presentationOf(source).name}'];
+    state = _settleWindow(result.state, recordResolution: true);
+    return const LocalDuelActionResult(true, 'Effet activé et Chaîne résolue.');
   }
 
   LocalDuelActionResult attack({
@@ -267,7 +311,10 @@ final class LocalDuelController {
     return result.actions;
   }
 
-  DuelState _settleWindow(DuelState initial) {
+  DuelState _settleWindow(
+    DuelState initial, {
+    bool recordResolution = false,
+  }) {
     var current = initial;
     var guard = 0;
     while (current.chain.isOpen && !current.isFinished && guard++ < 12) {
@@ -275,9 +322,31 @@ final class LocalDuelController {
       if (priority == null) break;
       final result = engine.passPriority(state: current, participant: priority);
       if (!result.succeeded) break;
+      if (recordResolution && result.resolutionTriggered) {
+        lastChainEvents = [
+          ...lastChainEvents,
+          for (final id in result.resolvedLinkIds) 'Résolu : $id',
+          for (final id in result.fizzledLinkIds) 'Annulé : $id',
+        ];
+      }
       current = result.state;
     }
     return current;
+  }
+
+  CardInstance? _findPlayerCard(String instanceId) {
+    final field = state.playerField;
+    for (final card in field.hand) {
+      if (card.instanceId == instanceId) return card;
+    }
+    for (final card in field.characterZones) {
+      if (card is CardInstance && card.instanceId == instanceId) return card;
+    }
+    for (final card in field.actionTrapZones) {
+      if (card?.instanceId == instanceId) return card;
+    }
+    if (field.terrainZone?.instanceId == instanceId) return field.terrainZone;
+    return null;
   }
 
   LocalDuelActionResult _failure(DuelActionFailure? failure) {
@@ -291,6 +360,15 @@ final class LocalDuelController {
         'Aucune Zone Personnage disponible.',
       DuelActionFailure.actionTrapZoneFull =>
         'Aucune Zone Action/Piège disponible.',
+      DuelActionFailure.notMainPhase =>
+        'Activez cette carte pendant une Phase Principale.',
+      DuelActionFailure.cardCannotBeActivated =>
+        'Cette carte ne peut pas être activée maintenant.',
+      DuelActionFailure.chainActivationConditionNotMet =>
+        'Les conditions de cet effet ne sont pas réunies.',
+      DuelActionFailure.illegalChainTarget => 'La cible choisie est illégale.',
+      DuelActionFailure.illegalChainSpeed =>
+        'La vitesse de cet effet ne permet pas cette réponse.',
       DuelActionFailure.notBattlePhase =>
         'Les attaques ne sont possibles qu’en Phase de Combat.',
       DuelActionFailure.attackForbiddenOnOpeningTurn =>

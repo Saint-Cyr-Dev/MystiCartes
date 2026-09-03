@@ -10,6 +10,8 @@ enum DuelActionFailure {
   cardNotInHand,
   cardIsNotCharacter,
   cardIsNotActionOrTrap,
+  cardCannotBeActivated,
+  notMainPhase,
   mythicNormalSummonForbidden,
   invalidCharacterRank,
   normalSummonAlreadyUsed,
@@ -1124,6 +1126,154 @@ final class DuelEngine {
     );
   }
 
+  /// Place ou retourne une carte du catalogue, puis tente son activation.
+  ///
+  /// Cette primitive garde le déplacement de zone dans le moteur pur. En cas
+  /// d'activation illégale, l'état original est retourné : aucune carte n'est
+  /// révélée et aucun coût n'est payé.
+  ChainActivationResult activateCard({
+    required DuelState state,
+    required DuelParticipant participant,
+    required String cardInstanceId,
+    required ChainLink link,
+  }) {
+    if (state.isFinished) {
+      return ChainActivationResult.failure(
+        state,
+        DuelActionFailure.duelFinished,
+      );
+    }
+    if (link.activatingPlayer != participant ||
+        link.sourceCardInstanceId != cardInstanceId) {
+      return ChainActivationResult.failure(
+        state,
+        DuelActionFailure.cardCannotBeActivated,
+      );
+    }
+
+    final field = _fieldFor(state, participant);
+    final handIndex = field.hand.indexWhere(
+      (card) => card.instanceId == cardInstanceId,
+    );
+    var preparedState = state;
+
+    if (handIndex >= 0) {
+      if (participant != state.activePlayer) {
+        return ChainActivationResult.failure(
+          state,
+          DuelActionFailure.notActivePlayer,
+        );
+      }
+      if (state.currentPhase != DuelPhase.main1 &&
+          state.currentPhase != DuelPhase.main2) {
+        return ChainActivationResult.failure(
+          state,
+          DuelActionFailure.notMainPhase,
+        );
+      }
+      if (state.chain.isOpen) {
+        return ChainActivationResult.failure(
+          state,
+          DuelActionFailure.chainWindowOpen,
+        );
+      }
+
+      final card = field.hand[handIndex];
+      if (card.category == CardCategory.mythic ||
+          card.category == CardCategory.character) {
+        return ChainActivationResult.failure(
+          state,
+          DuelActionFailure.cardCannotBeActivated,
+        );
+      }
+      final hand = List<CardInstance>.from(field.hand)..removeAt(handIndex);
+
+      if (card.category == CardCategory.terrain) {
+        var nextField = field.copyWith(hand: hand);
+        final previousTerrain = nextField.terrainZone;
+        if (previousTerrain != null) {
+          nextField = nextField.copyWith(
+            terrainZone: null,
+            graveyard: [
+              ...nextField.graveyard,
+              previousTerrain.copyWith(
+                controller: previousTerrain.owner,
+                faceUp: true,
+                position: null,
+                zoneIndex: null,
+              ),
+            ],
+          );
+        }
+        nextField = nextField.copyWith(
+          terrainZone: card.copyWith(
+            controller: participant,
+            faceUp: true,
+            position: null,
+            zoneIndex: 0,
+          ),
+        );
+        preparedState = _replaceField(state, participant, nextField);
+      } else {
+        final zones = List<CardInstance?>.from(field.actionTrapZones);
+        final zoneIndex = zones.indexWhere((candidate) => candidate == null);
+        if (zoneIndex < 0) {
+          return ChainActivationResult.failure(
+            state,
+            DuelActionFailure.actionTrapZoneFull,
+          );
+        }
+        zones[zoneIndex] = card.copyWith(
+          controller: participant,
+          faceUp: true,
+          position: null,
+          zoneIndex: zoneIndex,
+          runtimeData: {
+            ...card.runtimeData,
+            CardRuntimeKeys.pendingOneShotChainLink: link.linkId,
+          },
+        );
+        preparedState = _replaceField(
+          state,
+          participant,
+          field.copyWith(hand: hand, actionTrapZones: zones),
+        );
+      }
+    } else {
+      final source = _findFieldCatalogCard(state, cardInstanceId);
+      if (source == null || source.controller != participant) {
+        return ChainActivationResult.failure(
+          state,
+          DuelActionFailure.cardCannotBeActivated,
+        );
+      }
+      if (source.category == CardCategory.character ||
+          source.category == CardCategory.mythic) {
+        // Les effets activés de Personnage utilisent directement la Chaîne :
+        // ils n'ont pas besoin d'un changement de zone préalable.
+        preparedState = state;
+      } else if (!source.faceUp) {
+        preparedState = _updateCatalogCard(
+          state,
+          cardInstanceId,
+          (card) => card.copyWith(
+            faceUp: true,
+            runtimeData: {
+              ...card.runtimeData,
+              CardRuntimeKeys.pendingOneShotChainLink: link.linkId,
+            },
+          ),
+        );
+      }
+    }
+
+    final activation = activateChainEffect(state: preparedState, link: link);
+    if (!activation.succeeded) {
+      return ChainActivationResult.failure(state, activation.failure!);
+    }
+    return activation;
+  }
+
   /// Passe la priorité. La seconde passe consécutive résout la Chaîne en LIFO.
   PriorityPassResult passPriority({
     required DuelState state,
@@ -1195,6 +1345,11 @@ final class DuelEngine {
         );
         resolvedLinkIds.add(link.linkId);
       }
+
+      workingState = _sendResolvedOneShotSourceToGraveyard(
+        workingState,
+        link,
+      );
 
       workingState = _determineWinnerFromLifePoints(workingState);
       if (workingState.isFinished) {
@@ -1807,6 +1962,90 @@ final class DuelEngine {
       }
     }
     return null;
+  }
+
+  DuelState _updateCatalogCard(
+    DuelState state,
+    String instanceId,
+    CardInstance Function(CardInstance card) update,
+  ) {
+    for (final participant in DuelParticipant.values) {
+      final field = _fieldFor(state, participant);
+      final characterIndex = field.characterZones.indexWhere(
+        (card) => card is CardInstance && card.instanceId == instanceId,
+      );
+      if (characterIndex >= 0) {
+        final zones = List<FieldCardInstance?>.from(field.characterZones);
+        zones[characterIndex] = update(zones[characterIndex]! as CardInstance);
+        return _replaceField(
+          state,
+          participant,
+          field.copyWith(characterZones: zones),
+        );
+      }
+      final actionIndex = field.actionTrapZones.indexWhere(
+        (card) => card?.instanceId == instanceId,
+      );
+      if (actionIndex >= 0) {
+        final zones = List<CardInstance?>.from(field.actionTrapZones);
+        zones[actionIndex] = update(zones[actionIndex]!);
+        return _replaceField(
+          state,
+          participant,
+          field.copyWith(actionTrapZones: zones),
+        );
+      }
+      if (field.terrainZone?.instanceId == instanceId) {
+        return _replaceField(
+          state,
+          participant,
+          field.copyWith(terrainZone: update(field.terrainZone!)),
+        );
+      }
+    }
+    return state;
+  }
+
+  DuelState _sendResolvedOneShotSourceToGraveyard(
+    DuelState state,
+    ChainLink link,
+  ) {
+    final sourceId = link.sourceCardInstanceId;
+    if (sourceId == null) return state;
+    final source = _findFieldCatalogCard(state, sourceId);
+    if (source == null) return state;
+    if (source.runtimeData[CardRuntimeKeys.pendingOneShotChainLink] !=
+        link.linkId) {
+      return state;
+    }
+    final isOneShotAction = source.category == CardCategory.action &&
+        source.subtype != 'continuous';
+    final isOneShotTrap =
+        source.category == CardCategory.trap && source.subtype != 'continuous';
+    if (!isOneShotAction && !isOneShotTrap) return state;
+    return _sendCatalogCardToOwnerGraveyard(
+      _removeCatalogCardFromField(state, sourceId),
+      source,
+    );
+  }
+
+  DuelState _removeCatalogCardFromField(DuelState state, String instanceId) {
+    for (final participant in DuelParticipant.values) {
+      final field = _fieldFor(state, participant);
+      final actionIndex = field.actionTrapZones.indexWhere(
+        (card) => card?.instanceId == instanceId,
+      );
+      if (actionIndex >= 0) {
+        final zones = List<CardInstance?>.from(field.actionTrapZones)
+          ..[actionIndex] = null;
+        return _replaceField(
+          state,
+          participant,
+          field.copyWith(actionTrapZones: zones),
+        );
+      }
+    }
+    return state;
   }
 
   DuelState _enqueueAutomaticCombatFlipEffect(

@@ -22,6 +22,7 @@ abstract final class CardRuntimeKeys {
   static const combatDamageDivisor = 'combat_damage_divisor';
   static const combatDamageDivisorTurn = 'combat_damage_divisor_turn';
   static const savaneSpearEquipped = 'savane_spear_equipped';
+  static const pendingOneShotChainLink = 'pending_one_shot_chain_link';
 }
 
 /// Bonus ou malus de statistiques attaché à une instance pendant le duel.

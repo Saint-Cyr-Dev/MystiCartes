@@ -7,6 +7,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mysticartes/app/app_routes.dart';
+import 'package:mysticartes/main.dart';
 
 void main() {
   test('les routes principales de MystiCartes sont distinctes', () {
@@ -26,5 +27,17 @@ void main() {
       },
       hasLength(11),
     );
+  });
+
+  testWidgets('le bouton JOUER ouvre directement le duel en mode local',
+      (tester) async {
+    await tester.pumpWidget(const MystiCartesApp(localDemoMode: true));
+
+    expect(find.textContaining('MODE LOCAL V2'), findsOneWidget);
+    await tester.tap(find.text('JOUER'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Duel V2'), findsOneWidget);
+    expect(find.text('Préparation du duel'), findsNothing);
   });
 }
