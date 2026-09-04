@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../app/app_routes.dart';
+import 'auth_session_preferences.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -20,6 +21,17 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _createAccount = false;
   bool _rememberMe = true;
   bool _obscurePassword = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRememberPreference();
+  }
+
+  Future<void> _loadRememberPreference() async {
+    final remember = await AuthSessionPreferences.rememberSession();
+    if (mounted) setState(() => _rememberMe = remember);
+  }
 
   @override
   void dispose() {
@@ -46,6 +58,7 @@ class _AuthScreenState extends State<AuthScreen> {
           password: password,
         );
         if (!mounted) return;
+        await AuthSessionPreferences.setRememberSession(_rememberMe);
         if (response.session == null) {
           _showMessage(
             'Compte créé. Consultez votre e-mail pour le confirmer.',
@@ -57,6 +70,7 @@ class _AuthScreenState extends State<AuthScreen> {
           email: email,
           password: password,
         );
+        await AuthSessionPreferences.setRememberSession(_rememberMe);
       }
 
       if (!mounted) return;
@@ -111,6 +125,77 @@ class _AuthScreenState extends State<AuthScreen> {
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
   }
+
+  Future<void> _showLanguagePicker() => showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: const Color(0xFF151024),
+        builder: (context) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Langue du jeu',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 12),
+                ListTile(
+                  leading: const Icon(Icons.check_circle, color: _violet),
+                  title: const Text('Français'),
+                  subtitle: const Text('Langue active'),
+                  onTap: () => Navigator.pop(context),
+                ),
+                const ListTile(
+                  enabled: false,
+                  leading: Icon(Icons.language),
+                  title: Text('Autres langues'),
+                  subtitle: Text('Disponibles dans une prochaine version'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+  Future<void> _showHelp() => showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF171126),
+          icon: const Icon(Icons.help_outline_rounded, color: _violet),
+          title: const Text('Besoin d’aide ?'),
+          content: const Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Créer un compte',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 4),
+              Text(
+                'Choisissez « Créer un nouveau compte », puis utilisez un e-mail valide et un mot de passe d’au moins 6 caractères.',
+              ),
+              SizedBox(height: 16),
+              Text(
+                'Compte inaccessible',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 4),
+              Text(
+                'Entrez votre e-mail puis choisissez « Mot de passe oublié ? » pour recevoir un lien de récupération.',
+              ),
+            ],
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('J’ai compris'),
+            ),
+          ],
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -286,23 +371,22 @@ class _AuthScreenState extends State<AuthScreen> {
                               ],
                             ),
                             const SizedBox(height: 34),
-                            Row(
+                            Wrap(
+                              alignment: WrapAlignment.spaceBetween,
+                              runAlignment: WrapAlignment.center,
+                              spacing: 12,
+                              runSpacing: 10,
                               children: [
                                 _FooterPill(
                                   icon: Icons.language_rounded,
                                   label: 'Français',
-                                  onPressed: () => _showMessage(
-                                    'Le français est la langue active.',
-                                  ),
+                                  onPressed: _showLanguagePicker,
                                 ),
-                                const Spacer(),
                                 _FooterPill(
                                   icon: Icons.help_outline_rounded,
                                   label: 'Besoin d’aide ?',
                                   iconAtEnd: true,
-                                  onPressed: () => _showMessage(
-                                    'L’assistance MystiCartes arrive bientôt.',
-                                  ),
+                                  onPressed: _showHelp,
                                 ),
                               ],
                             ),
@@ -511,7 +595,12 @@ class _PrimaryAuthButton extends StatelessWidget {
               : Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(label),
+                    Flexible(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(label),
+                      ),
+                    ),
                     const SizedBox(width: 18),
                     const Icon(Icons.arrow_forward_rounded, size: 30),
                   ],

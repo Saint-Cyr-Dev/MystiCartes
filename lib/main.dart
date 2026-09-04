@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'app/app_routes.dart';
 import 'game/ai/ai_strategy.dart';
 import 'features/auth/auth_screen.dart';
+import 'features/auth/auth_session_preferences.dart';
 import 'features/auth/choose_username_screen.dart';
 import 'features/auth/onboarding_repository.dart';
 import 'features/auth/startup_gate_screen.dart';
@@ -29,6 +30,7 @@ Future<void> main() async {
       url: _supabaseUrl,
       publishableKey: _supabaseAnonKey,
     );
+    await AuthSessionPreferences.applyAtStartup(Supabase.instance.client);
   }
   runApp(MystiCartesApp(localDemoMode: !hasSupabaseConfiguration));
 }
