@@ -19,6 +19,7 @@ class BattleScreen extends StatefulWidget {
     this.playerMythicReserve = const [],
     this.isFirstBattle = false,
     this.resultRepository,
+    this.controller,
     super.key,
   });
 
@@ -28,6 +29,7 @@ class BattleScreen extends StatefulWidget {
   final List<LocalCardPresentation> playerMythicReserve;
   final bool isFirstBattle;
   final BattleResultDataSource? resultRepository;
+  final LocalDuelController? controller;
 
   @override
   State<BattleScreen> createState() => _BattleScreenState();
@@ -52,17 +54,20 @@ class _BattleScreenState extends State<BattleScreen> {
   String? _feedbackCardId;
   String? _feedbackMessage;
   int _feedbackToken = 0;
+  List<LocalChainResponseOption> _pendingTargetOptions = const [];
+  String? _pendingChainSourceId;
 
   @override
   void initState() {
     super.initState();
     _difficulty = widget.difficulty;
     _startedAt = DateTime.now().toUtc();
-    _duel = LocalDuelController.create(
-      difficulty: _difficulty,
-      playerDeck: widget.playerDeck,
-      playerMythicReserve: widget.playerMythicReserve,
-    );
+    _duel = widget.controller ??
+        LocalDuelController.create(
+          difficulty: _difficulty,
+          playerDeck: widget.playerDeck,
+          playerMythicReserve: widget.playerMythicReserve,
+        );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _showTurnBanner(DuelParticipant.player);
     });
@@ -94,6 +99,8 @@ class _BattleScreenState extends State<BattleScreen> {
       _hudMessage = null;
       _feedbackCardId = null;
       _feedbackMessage = null;
+      _pendingTargetOptions = const [];
+      _pendingChainSourceId = null;
     });
     _showTurnBanner(DuelParticipant.player);
   }
@@ -172,8 +179,118 @@ class _BattleScreenState extends State<BattleScreen> {
     });
   }
 
+  List<LocalChainResponseOption> get _chainOptions =>
+      _duel.awaitingPlayerPriority
+          ? _duel.availablePlayerResponses()
+          : const [];
+
+  Set<String> get _activatableCardIds =>
+      _chainOptions.map((option) => option.card.instanceId).toSet();
+
+  Set<String> get _validChainTargetIds => _pendingTargetOptions
+      .map((option) => option.link.target?.cardInstanceId)
+      .whereType<String>()
+      .toSet();
+
+  Future<void> _chooseChainCard(String cardInstanceId) async {
+    final options = _chainOptions
+        .where((option) => option.card.instanceId == cardInstanceId)
+        .toList(growable: false);
+    if (options.isEmpty) return;
+    if (options.length == 1) {
+      _activateChainOption(options.single);
+      return;
+    }
+    final targetIds = options
+        .map((option) => option.link.target?.cardInstanceId)
+        .whereType<String>()
+        .toList(growable: false);
+    if (targetIds.length == options.length && targetIds.toSet().length > 1) {
+      setState(() {
+        _pendingChainSourceId = cardInstanceId;
+        _pendingTargetOptions = options;
+      });
+      _showHudMessage('Choisis une cible lumineuse');
+      return;
+    }
+    final selected = await showModalBottomSheet<LocalChainResponseOption>(
+      context: context,
+      backgroundColor: const Color(0xFF171124),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.link, color: Color(0xFF72F7D0)),
+              const SizedBox(height: 6),
+              const Text(
+                'Choisis le coût ou la combinaison',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 8),
+              for (final option in options)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.bolt),
+                  title: Text(option.label),
+                  onTap: () => Navigator.pop(context, option),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (selected != null) _activateChainOption(selected);
+  }
+
+  bool _trySelectChainTarget(String cardInstanceId) {
+    final option = _pendingTargetOptions
+        .where(
+          (candidate) =>
+              candidate.link.target?.cardInstanceId == cardInstanceId,
+        )
+        .firstOrNull;
+    if (option == null) return false;
+    _activateChainOption(option);
+    return true;
+  }
+
+  void _activateChainOption(LocalChainResponseOption option) {
+    final result = _duel.activatePlayerResponse(option: option);
+    setState(() {
+      _pendingTargetOptions = const [];
+      _pendingChainSourceId = null;
+    });
+    if (!result.succeeded) {
+      _showCardError(option.card.instanceId, result.message);
+    }
+    _checkEnd();
+  }
+
+  Future<void> _passChainPriority() async {
+    final result = _duel.passPlayerPriority();
+    setState(() {
+      _pendingTargetOptions = const [];
+      _pendingChainSourceId = null;
+    });
+    if (!result.succeeded) {
+      _showHudMessage(result.message, error: true);
+      return;
+    }
+    _checkEnd();
+    if (!mounted || _duel.state.isFinished) return;
+    if (_duel.state.activePlayer == DuelParticipant.ai) {
+      await _runAiUntilDecision();
+    }
+  }
+
   Future<void> _playHandCard(CardInstance card) async {
     if (_aiPlaying || _duel.state.isFinished) return;
+    if (_duel.awaitingPlayerPriority) {
+      await _chooseChainCard(card.instanceId);
+      return;
+    }
     if (_duel.state.activePlayer != DuelParticipant.player ||
         !{DuelPhase.main1, DuelPhase.main2}
             .contains(_duel.state.currentPhase)) {
@@ -248,9 +365,6 @@ class _BattleScreenState extends State<BattleScreen> {
         _showCardError(card.instanceId, result.message);
       }
       _checkEnd();
-      if (result.succeeded && _duel.awaitingPlayerPriority) {
-        await _showChainDecision();
-      }
       return;
     }
 
@@ -295,9 +409,6 @@ class _BattleScreenState extends State<BattleScreen> {
       setState(() {});
       if (!result.succeeded) {
         _showCardError(card.instanceId, result.message);
-      }
-      if (result.succeeded && _duel.awaitingPlayerPriority) {
-        await _showChainDecision();
       }
       return;
     }
@@ -345,9 +456,6 @@ class _BattleScreenState extends State<BattleScreen> {
       _showCardError(card.instanceId, result.message);
     }
     _checkEnd();
-    if (result.succeeded && _duel.awaitingPlayerPriority) {
-      await _showChainDecision();
-    }
   }
 
   void _showCards(String title, List<CardInstance> cards) {
@@ -392,6 +500,7 @@ class _BattleScreenState extends State<BattleScreen> {
 
   void _tapOwnCharacter(FieldCardInstance card) {
     if (_aiPlaying || _duel.state.isFinished) return;
+    if (_trySelectChainTarget(card.instanceId)) return;
     final state = _duel.state;
     if ({DuelPhase.main1, DuelPhase.main2}.contains(state.currentPhase)) {
       setState(() {
@@ -418,12 +527,23 @@ class _BattleScreenState extends State<BattleScreen> {
   }
 
   void _tapOpponentCharacter(FieldCardInstance card) {
+    if (_trySelectChainTarget(card.instanceId)) return;
     final attackerId = _selectedAttackerId;
     if (attackerId == null) {
       _showCardError(card.instanceId, 'Choisis d’abord un attaquant');
       return;
     }
     _resolveAttack(attackerId, card.instanceId);
+  }
+
+  void _tapSupportCard(FieldCardInstance card) {
+    if (_trySelectChainTarget(card.instanceId)) return;
+    if (card is! CardInstance) return;
+    if (_duel.awaitingPlayerPriority) {
+      _chooseChainCard(card.instanceId);
+      return;
+    }
+    _activateEffectCard(card);
   }
 
   void _resolveAttack(String attackerId, String? targetId) {
@@ -483,9 +603,6 @@ class _BattleScreenState extends State<BattleScreen> {
     if (_duel.state.isFinished) return;
 
     if (_duel.awaitingPlayerPriority) {
-      await _showChainDecision();
-      if (!mounted || _duel.state.isFinished) return;
-      await _runAiUntilDecision();
       return;
     }
 
@@ -494,59 +611,6 @@ class _BattleScreenState extends State<BattleScreen> {
       _showHudMessage(
         '${actions.length} action${actions.length > 1 ? 's' : ''} adverse${actions.length > 1 ? 's' : ''}',
       );
-    }
-  }
-
-  Future<void> _showChainDecision() async {
-    while (mounted && _duel.awaitingPlayerPriority) {
-      final options = _duel.availablePlayerResponses();
-      if (!mounted) return;
-      final choice = await showDialog<Object>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          icon: const Icon(Icons.link, size: 42),
-          title: const Text('Fenêtre de réponse'),
-          content: Text(
-            _duel.pendingAiAttack == null
-                ? 'Une fenêtre de réponse est ouverte. Vous avez la priorité.'
-                : "L'IA déclare une attaque. Activez une réponse ou passez.",
-          ),
-          actions: [
-            for (var index = 0; index < options.length; index++)
-              TextButton(
-                onPressed: () => Navigator.pop(context, index),
-                child: Text(options[index].label),
-              ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, 'pass'),
-              child: const Text('Passer'),
-            ),
-          ],
-        ),
-      );
-      if (!mounted) return;
-
-      if (choice == 'pass') {
-        final result = _duel.passPlayerPriority();
-        setState(() {});
-        if (!result.succeeded) {
-          _showHudMessage(result.message, error: true);
-        }
-        return;
-      }
-      if (choice is! int || choice < 0 || choice >= options.length) continue;
-
-      final option = options[choice];
-      final result = _duel.activatePlayerResponse(
-        option: option,
-      );
-      setState(() {});
-      if (!result.succeeded) {
-        _showCardError(option.card.instanceId, result.message);
-      }
-      _checkEnd();
-      if (!result.succeeded) continue;
     }
   }
 
@@ -654,6 +718,8 @@ class _BattleScreenState extends State<BattleScreen> {
   @override
   Widget build(BuildContext context) {
     final state = _duel.state;
+    final activatableIds = _activatableCardIds;
+    final validTargetIds = _validChainTargetIds;
     return Scaffold(
       appBar: AppBar(
         title: Text('Duel V2 · ${_difficultyLabel(_difficulty)}'),
@@ -717,7 +783,10 @@ class _BattleScreenState extends State<BattleScreen> {
                             controller: _duel,
                             feedbackCardId: _feedbackCardId,
                             feedbackMessage: _feedbackMessage,
-                            feedbackToken: _feedbackToken),
+                            feedbackToken: _feedbackToken,
+                            activatableIds: activatableIds,
+                            validTargetIds: validTargetIds,
+                            onCardTap: _tapSupportCard),
                         const SizedBox(height: 6),
                         _ZoneRow(
                             zones: state.aiField.characterZones,
@@ -726,6 +795,8 @@ class _BattleScreenState extends State<BattleScreen> {
                             feedbackCardId: _feedbackCardId,
                             feedbackMessage: _feedbackMessage,
                             feedbackToken: _feedbackToken,
+                            activatableIds: activatableIds,
+                            validTargetIds: validTargetIds,
                             onCardTap: _tapOpponentCharacter),
                         const SizedBox(height: 6),
                         _TerrainSlot(
@@ -735,6 +806,14 @@ class _BattleScreenState extends State<BattleScreen> {
                           feedbackCardId: _feedbackCardId,
                           feedbackMessage: _feedbackMessage,
                           feedbackToken: _feedbackToken,
+                          activatable: activatableIds
+                              .contains(state.aiField.terrainZone?.instanceId),
+                          validTarget: validTargetIds
+                              .contains(state.aiField.terrainZone?.instanceId),
+                          onTap: state.aiField.terrainZone == null
+                              ? null
+                              : () =>
+                                  _tapSupportCard(state.aiField.terrainZone!),
                         ),
                         const SizedBox(height: 12),
                         _PhaseBar(
@@ -756,19 +835,23 @@ class _BattleScreenState extends State<BattleScreen> {
                             feedbackCardId: _feedbackCardId,
                             feedbackMessage: _feedbackMessage,
                             feedbackToken: _feedbackToken,
+                            activatableIds: activatableIds,
+                            validTargetIds: validTargetIds,
                             onCardTap: _tapOwnCharacter),
                         const SizedBox(height: 6),
                         _ZoneRow(
                             zones: state.playerField.actionTrapZones,
                             controller: _duel,
+                            selectedIds: {
+                              if (_pendingChainSourceId != null)
+                                _pendingChainSourceId!,
+                            },
                             feedbackCardId: _feedbackCardId,
                             feedbackMessage: _feedbackMessage,
                             feedbackToken: _feedbackToken,
-                            onCardTap: (card) {
-                              if (card is CardInstance) {
-                                _activateEffectCard(card);
-                              }
-                            }),
+                            activatableIds: activatableIds,
+                            validTargetIds: validTargetIds,
+                            onCardTap: _tapSupportCard),
                         const SizedBox(height: 6),
                         _TerrainSlot(
                           card: state.playerField.terrainZone,
@@ -776,9 +859,15 @@ class _BattleScreenState extends State<BattleScreen> {
                           feedbackCardId: _feedbackCardId,
                           feedbackMessage: _feedbackMessage,
                           feedbackToken: _feedbackToken,
+                          activatable: activatableIds.contains(
+                            state.playerField.terrainZone?.instanceId,
+                          ),
+                          validTarget: validTargetIds.contains(
+                            state.playerField.terrainZone?.instanceId,
+                          ),
                           onTap: state.playerField.terrainZone == null
                               ? null
-                              : () => _activateEffectCard(
+                              : () => _tapSupportCard(
                                     state.playerField.terrainZone!,
                                   ),
                         ),
@@ -858,11 +947,17 @@ class _BattleScreenState extends State<BattleScreen> {
                                   card: card,
                                   presentation: _duel.presentationOf(card),
                                   compact: false,
+                                  selected:
+                                      _pendingChainSourceId == card.instanceId,
                                   feedbackMessage:
                                       _feedbackCardId == card.instanceId
                                           ? _feedbackMessage
                                           : null,
                                   feedbackToken: _feedbackToken,
+                                  activatable:
+                                      activatableIds.contains(card.instanceId),
+                                  validTarget:
+                                      validTargetIds.contains(card.instanceId),
                                   onTap: () => _playHandCard(card));
                             },
                           ),
@@ -928,6 +1023,17 @@ class _BattleScreenState extends State<BattleScreen> {
               ),
             ),
           ),
+          if (_duel.awaitingPlayerPriority)
+            Positioned(
+              right: 18,
+              bottom: 18,
+              child: SafeArea(
+                child: _ChainPassButton(
+                  hasActivations: activatableIds.isNotEmpty,
+                  onPressed: _passChainPriority,
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1217,6 +1323,65 @@ class _HudFeedback extends StatelessWidget {
       );
 }
 
+class _ChainPassButton extends StatelessWidget {
+  const _ChainPassButton({
+    required this.hasActivations,
+    required this.onPressed,
+  });
+
+  final bool hasActivations;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+        duration: const Duration(milliseconds: 320),
+        tween: Tween(begin: .9, end: 1),
+        curve: Curves.easeOutBack,
+        builder: (context, value, child) => Transform.scale(
+          scale: value,
+          child: child,
+        ),
+        child: Container(
+          key: const Key('battle-chain-controls'),
+          padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+          decoration: BoxDecoration(
+            color: const Color(0xF21A1228),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: const Color(0xFF72F7D0)),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF72F7D0).withValues(alpha: .28),
+                blurRadius: 18,
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                hasActivations ? Icons.touch_app_rounded : Icons.link_rounded,
+                color: const Color(0xFF72F7D0),
+                size: 20,
+              ),
+              const SizedBox(width: 7),
+              if (hasActivations)
+                const Text(
+                  'Carte lumineuse',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                ),
+              if (hasActivations) const SizedBox(width: 8),
+              FilledButton.tonalIcon(
+                key: const Key('battle-chain-pass'),
+                onPressed: onPressed,
+                icon: const Icon(Icons.fast_forward_rounded, size: 18),
+                label: const Text('Passer'),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
 class _TerrainSlot extends StatelessWidget {
   const _TerrainSlot({
     required this.card,
@@ -1226,6 +1391,8 @@ class _TerrainSlot extends StatelessWidget {
     this.feedbackCardId,
     this.feedbackMessage,
     this.feedbackToken = 0,
+    this.activatable = false,
+    this.validTarget = false,
   });
 
   final CardInstance? card;
@@ -1235,6 +1402,8 @@ class _TerrainSlot extends StatelessWidget {
   final String? feedbackCardId;
   final String? feedbackMessage;
   final int feedbackToken;
+  final bool activatable;
+  final bool validTarget;
 
   @override
   Widget build(BuildContext context) => Row(
@@ -1263,6 +1432,8 @@ class _TerrainSlot extends StatelessWidget {
                         ? feedbackMessage
                         : null,
                     feedbackToken: feedbackToken,
+                    activatable: activatable,
+                    validTarget: validTarget,
                     onTap: onTap,
                   ),
           ),
@@ -1279,6 +1450,8 @@ class _ZoneRow extends StatelessWidget {
       this.feedbackCardId,
       this.feedbackMessage,
       this.feedbackToken = 0,
+      this.activatableIds = const {},
+      this.validTargetIds = const {},
       this.onCardTap});
   final List<FieldCardInstance?> zones;
   final LocalDuelController controller;
@@ -1287,6 +1460,8 @@ class _ZoneRow extends StatelessWidget {
   final String? feedbackCardId;
   final String? feedbackMessage;
   final int feedbackToken;
+  final Set<String> activatableIds;
+  final Set<String> validTargetIds;
   final ValueChanged<FieldCardInstance>? onCardTap;
 
   @override
@@ -1318,6 +1493,10 @@ class _ZoneRow extends StatelessWidget {
                               ? feedbackMessage
                               : null,
                       feedbackToken: feedbackToken,
+                      activatable:
+                          activatableIds.contains(zones[index]!.instanceId),
+                      validTarget:
+                          validTargetIds.contains(zones[index]!.instanceId),
                       onTap: onCardTap == null
                           ? null
                           : () => onCardTap!(zones[index]!)),
@@ -1336,6 +1515,8 @@ class _DuelCard extends StatefulWidget {
       this.selected = false,
       this.feedbackMessage,
       this.feedbackToken = 0,
+      this.activatable = false,
+      this.validTarget = false,
       this.onTap});
   final FieldCardInstance card;
   final LocalCardPresentation presentation;
@@ -1344,18 +1525,29 @@ class _DuelCard extends StatefulWidget {
   final bool selected;
   final String? feedbackMessage;
   final int feedbackToken;
+  final bool activatable;
+  final bool validTarget;
   final VoidCallback? onTap;
 
   @override
   State<_DuelCard> createState() => _DuelCardState();
 }
 
-class _DuelCardState extends State<_DuelCard>
-    with SingleTickerProviderStateMixin {
+class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
   late final AnimationController _shakeController = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 380),
   );
+  late final AnimationController _pulseController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 760),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _syncPulse();
+  }
 
   @override
   void didUpdateWidget(covariant _DuelCard oldWidget) {
@@ -1365,11 +1557,25 @@ class _DuelCardState extends State<_DuelCard>
             oldWidget.feedbackMessage == null)) {
       _shakeController.forward(from: 0);
     }
+    if (widget.activatable != oldWidget.activatable ||
+        widget.validTarget != oldWidget.validTarget) {
+      _syncPulse();
+    }
+  }
+
+  void _syncPulse() {
+    if (widget.activatable || widget.validTarget) {
+      _pulseController.repeat(reverse: true);
+    } else {
+      _pulseController.stop();
+      _pulseController.value = 0;
+    }
   }
 
   @override
   void dispose() {
     _shakeController.dispose();
+    _pulseController.dispose();
     super.dispose();
   }
 
@@ -1379,7 +1585,7 @@ class _DuelCardState extends State<_DuelCard>
         widget.presentation.category == CardCategory.character ||
             widget.presentation.category == CardCategory.mythic;
     return AnimatedBuilder(
-      animation: _shakeController,
+      animation: Listenable.merge([_shakeController, _pulseController]),
       builder: (context, child) {
         final progress = _shakeController.value;
         final offset = math.sin(progress * math.pi * 6) * (1 - progress) * 7;
@@ -1399,29 +1605,51 @@ class _DuelCardState extends State<_DuelCard>
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: widget.onTap,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
+            child: Container(
+              key: widget.validTarget
+                  ? ValueKey('battle-target-${widget.card.instanceId}')
+                  : widget.activatable
+                      ? ValueKey(
+                          'battle-activatable-${widget.card.instanceId}',
+                        )
+                      : null,
               padding: EdgeInsets.all(widget.compact ? 5 : 8),
               decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(9),
                   border: Border.all(
                       color: widget.feedbackMessage != null
                           ? const Color(0xFFFF4D67)
-                          : widget.selected
-                              ? const Color(0xFFFFD166)
-                              : Colors.white38,
-                      width: widget.feedbackMessage != null || widget.selected
+                          : widget.validTarget
+                              ? const Color(0xFFFFD85A)
+                              : widget.activatable
+                                  ? const Color(0xFF65F5CB)
+                                  : widget.selected
+                                      ? const Color(0xFFFFD166)
+                                      : Colors.white38,
+                      width: widget.feedbackMessage != null ||
+                              widget.selected ||
+                              widget.activatable ||
+                              widget.validTarget
                           ? 3
                           : 1),
-                  boxShadow: widget.feedbackMessage == null
-                      ? const []
-                      : [
-                          BoxShadow(
-                            color:
-                                const Color(0xFFFF294D).withValues(alpha: .8),
-                            blurRadius: 14,
-                          ),
-                        ]),
+                  boxShadow: [
+                    if (widget.feedbackMessage != null)
+                      BoxShadow(
+                        color: const Color(0xFFFF294D).withValues(alpha: .8),
+                        blurRadius: 14,
+                      ),
+                    if (widget.activatable || widget.validTarget)
+                      BoxShadow(
+                        color: (widget.validTarget
+                                ? const Color(0xFFFFD85A)
+                                : const Color(0xFF65F5CB))
+                            .withValues(
+                          alpha: .35 + _pulseController.value * .5,
+                        ),
+                        blurRadius: 9 + _pulseController.value * 13,
+                        spreadRadius: _pulseController.value * 2,
+                      ),
+                  ]),
               child: widget.hideIdentity
                   ? const Center(child: Icon(Icons.auto_awesome, size: 30))
                   : Stack(
