@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../app/app_routes.dart';
 import '../../game/ai/ai_strategy.dart';
+import '../../game/battle_state.dart';
 import '../../game/card.dart';
 import '../../game/duel_types.dart';
 import 'battle_result_repository.dart';
@@ -56,6 +57,14 @@ class _BattleScreenState extends State<BattleScreen> {
   int _feedbackToken = 0;
   List<LocalChainResponseOption> _pendingTargetOptions = const [];
   String? _pendingChainSourceId;
+  final Map<String, String> _cardFloatLabels = {};
+  final Map<String, int> _cardFloatTokens = {};
+  final Set<String> _summoningCardIds = {};
+  final List<_BattleOverlayEvent> _overlayEvents = [];
+  final List<Timer> _visualTimers = [];
+  String? _attackingCardId;
+  int _attackAnimationToken = 0;
+  int _visualSerial = 0;
 
   @override
   void initState() {
@@ -78,6 +87,9 @@ class _BattleScreenState extends State<BattleScreen> {
     _bannerTimer?.cancel();
     _hudTimer?.cancel();
     _cardFeedbackTimer?.cancel();
+    for (final timer in _visualTimers) {
+      timer.cancel();
+    }
     super.dispose();
   }
 
@@ -101,6 +113,11 @@ class _BattleScreenState extends State<BattleScreen> {
       _feedbackMessage = null;
       _pendingTargetOptions = const [];
       _pendingChainSourceId = null;
+      _cardFloatLabels.clear();
+      _cardFloatTokens.clear();
+      _summoningCardIds.clear();
+      _overlayEvents.clear();
+      _attackingCardId = null;
     });
     _showTurnBanner(DuelParticipant.player);
   }
@@ -257,6 +274,7 @@ class _BattleScreenState extends State<BattleScreen> {
   }
 
   void _activateChainOption(LocalChainResponseOption option) {
+    final before = _duel.state;
     final result = _duel.activatePlayerResponse(option: option);
     setState(() {
       _pendingTargetOptions = const [];
@@ -264,11 +282,14 @@ class _BattleScreenState extends State<BattleScreen> {
     });
     if (!result.succeeded) {
       _showCardError(option.card.instanceId, result.message);
+    } else {
+      _visualizeStateDelta(before, _duel.state);
     }
     _checkEnd();
   }
 
   Future<void> _passChainPriority() async {
+    final before = _duel.state;
     final result = _duel.passPlayerPriority();
     setState(() {
       _pendingTargetOptions = const [];
@@ -278,12 +299,143 @@ class _BattleScreenState extends State<BattleScreen> {
       _showHudMessage(result.message, error: true);
       return;
     }
+    _visualizeStateDelta(before, _duel.state);
     _checkEnd();
     if (!mounted || _duel.state.isFinished) return;
     if (_duel.state.activePlayer == DuelParticipant.ai) {
       await _runAiUntilDecision();
     }
   }
+
+  void _showCardFloat(String instanceId, String label) {
+    final token = ++_visualSerial;
+    setState(() {
+      _cardFloatLabels[instanceId] = label;
+      _cardFloatTokens[instanceId] = token;
+    });
+    late final Timer timer;
+    timer = Timer(const Duration(milliseconds: 1050), () {
+      _visualTimers.remove(timer);
+      if (!mounted || _cardFloatTokens[instanceId] != token) return;
+      setState(() {
+        _cardFloatLabels.remove(instanceId);
+        _cardFloatTokens.remove(instanceId);
+      });
+    });
+    _visualTimers.add(timer);
+  }
+
+  void _addOverlayEvent(_BattleOverlayEvent event) {
+    setState(() => _overlayEvents.add(event));
+    late final Timer timer;
+    timer = Timer(const Duration(milliseconds: 900), () {
+      _visualTimers.remove(timer);
+      if (mounted) setState(() => _overlayEvents.remove(event));
+    });
+    _visualTimers.add(timer);
+  }
+
+  void _visualizeStateDelta(DuelState before, DuelState after) {
+    final beforeCards = _fieldCards(before);
+    final afterCards = _fieldCards(after);
+    for (final entry in afterCards.entries) {
+      final previous = beforeCards[entry.key];
+      final current = entry.value;
+      if (previous == null) {
+        if (current.category == CardCategory.character ||
+            current.category == CardCategory.mythic) {
+          final id = current.instanceId;
+          setState(() => _summoningCardIds.add(id));
+          late final Timer timer;
+          timer = Timer(const Duration(milliseconds: 650), () {
+            _visualTimers.remove(timer);
+            if (mounted) setState(() => _summoningCardIds.remove(id));
+          });
+          _visualTimers.add(timer);
+          if (current.category == CardCategory.mythic) {
+            _addOverlayEvent(
+              _BattleOverlayEvent.mythic(
+                serial: ++_visualSerial,
+                label: _duel.presentationOf(current).name,
+              ),
+            );
+          }
+        }
+        continue;
+      }
+      final atkDelta =
+          (current.effectiveAtk ?? 0) - (previous.effectiveAtk ?? 0);
+      final defDelta =
+          (current.effectiveDef ?? 0) - (previous.effectiveDef ?? 0);
+      final labels = <String>[];
+      if (atkDelta != 0) labels.add('${atkDelta > 0 ? '+' : ''}$atkDelta ATK');
+      if (defDelta != 0) labels.add('${defDelta > 0 ? '+' : ''}$defDelta DEF');
+      if (labels.isNotEmpty) _showCardFloat(entry.key, labels.join('  '));
+
+      final changedCounters = <String>[];
+      final counterNames = {
+        ...previous.counters.keys,
+        ...current.counters.keys
+      };
+      for (final name in counterNames) {
+        final delta =
+            (current.counters[name] ?? 0) - (previous.counters[name] ?? 0);
+        if (delta != 0) {
+          changedCounters.add('${delta > 0 ? '+' : ''}$delta $name');
+        }
+      }
+      if (changedCounters.isNotEmpty) {
+        _showCardFloat(entry.key, '✦ ${changedCounters.join('  ')}');
+      }
+    }
+
+    for (final entry in beforeCards.entries) {
+      if (afterCards.containsKey(entry.key)) continue;
+      final wasDestroyed = after.playerField.graveyard
+              .any((card) => card.instanceId == entry.key) ||
+          after.aiField.graveyard.any((card) => card.instanceId == entry.key);
+      if (wasDestroyed) {
+        _addOverlayEvent(
+          _BattleOverlayEvent.destruction(
+            serial: ++_visualSerial,
+            label: _duel.presentationOf(entry.value).name,
+          ),
+        );
+      }
+    }
+
+    final playerLifeDelta = after.playerLifePoints - before.playerLifePoints;
+    final aiLifeDelta = after.aiLifePoints - before.aiLifePoints;
+    if (playerLifeDelta != 0) {
+      _addOverlayEvent(
+        _BattleOverlayEvent.life(
+          serial: ++_visualSerial,
+          amount: playerLifeDelta,
+          forPlayer: true,
+        ),
+      );
+    }
+    if (aiLifeDelta != 0) {
+      _addOverlayEvent(
+        _BattleOverlayEvent.life(
+          serial: ++_visualSerial,
+          amount: aiLifeDelta,
+          forPlayer: false,
+        ),
+      );
+    }
+  }
+
+  Map<String, CardInstance> _fieldCards(DuelState state) => {
+        for (final field in [state.playerField, state.aiField]) ...{
+          for (final card in field.characterZones.whereType<CardInstance>())
+            card.instanceId: card,
+          for (final card in field.actionTrapZones.whereType<CardInstance>())
+            card.instanceId: card,
+          if (field.terrainZone case final CardInstance terrain)
+            terrain.instanceId: terrain,
+        },
+      };
 
   Future<void> _playHandCard(CardInstance card) async {
     if (_aiPlaying || _duel.state.isFinished) return;
@@ -352,6 +504,7 @@ class _BattleScreenState extends State<BattleScreen> {
         ),
       );
       if (faceUp == null) return;
+      final before = _duel.state;
       final result = _duel.playCharacter(
         cardInstanceId: card.instanceId,
         faceUpAttack: faceUp,
@@ -363,6 +516,8 @@ class _BattleScreenState extends State<BattleScreen> {
       });
       if (!result.succeeded) {
         _showCardError(card.instanceId, result.message);
+      } else {
+        _visualizeStateDelta(before, _duel.state);
       }
       _checkEnd();
       return;
@@ -405,10 +560,13 @@ class _BattleScreenState extends State<BattleScreen> {
         }
         if (choice != 'set') return;
       }
+      final before = _duel.state;
       final result = _duel.setActionOrTrap(card.instanceId);
       setState(() {});
       if (!result.succeeded) {
         _showCardError(card.instanceId, result.message);
+      } else {
+        _visualizeStateDelta(before, _duel.state);
       }
       return;
     }
@@ -446,6 +604,7 @@ class _BattleScreenState extends State<BattleScreen> {
       if (index == null) return;
       selected = options[index];
     }
+    final before = _duel.state;
     final result = _duel.activatePreparedOption(
       option: selected,
       resolveImmediately: true,
@@ -454,6 +613,8 @@ class _BattleScreenState extends State<BattleScreen> {
     setState(() {});
     if (!result.succeeded) {
       _showCardError(card.instanceId, result.message);
+    } else {
+      _visualizeStateDelta(before, _duel.state);
     }
     _checkEnd();
   }
@@ -546,20 +707,39 @@ class _BattleScreenState extends State<BattleScreen> {
     _activateEffectCard(card);
   }
 
-  void _resolveAttack(String attackerId, String? targetId) {
+  Future<void> _resolveAttack(String attackerId, String? targetId) async {
+    setState(() {
+      _attackingCardId = attackerId;
+      _attackAnimationToken++;
+    });
+    _addOverlayEvent(
+      _BattleOverlayEvent.impact(
+        serial: ++_visualSerial,
+        direct: targetId == null,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 360));
+    if (!mounted) return;
+    final before = _duel.state;
     final result = _duel.attack(
       attackerInstanceId: attackerId,
       targetInstanceId: targetId,
     );
-    setState(() => _selectedAttackerId = null);
+    setState(() {
+      _selectedAttackerId = null;
+      _attackingCardId = null;
+    });
     if (!result.succeeded) {
       _showCardError(attackerId, result.message);
+    } else {
+      _visualizeStateDelta(before, _duel.state);
     }
     _checkEnd();
   }
 
   Future<void> _nextPhase() async {
     if (_aiPlaying || _duel.state.isFinished) return;
+    final previousState = _duel.state;
     final previousPlayer = _duel.state.activePlayer;
     final previousPhase = _duel.state.currentPhase;
     final result = _duel.advancePlayerPhase();
@@ -571,6 +751,7 @@ class _BattleScreenState extends State<BattleScreen> {
       _showHudMessage(result.message, error: true);
       return;
     }
+    _visualizeStateDelta(previousState, _duel.state);
     _showTransition(
       previousPlayer: previousPlayer,
       previousPhase: previousPhase,
@@ -590,11 +771,22 @@ class _BattleScreenState extends State<BattleScreen> {
     }
     setState(() => _aiPlaying = true);
     await Future<void>.delayed(const Duration(milliseconds: 450));
+    final previousState = _duel.state;
+    final previousPendingAttack = _duel.pendingAiAttack;
     final previousPlayer = _duel.state.activePlayer;
     final previousPhase = _duel.state.currentPhase;
-    final actions = _duel.playAiUntilPlayerDecision();
+    _duel.playAiUntilPlayerDecision();
     if (!mounted) return;
     setState(() => _aiPlaying = false);
+    _visualizeStateDelta(previousState, _duel.state);
+    if (previousPendingAttack == null && _duel.pendingAiAttack != null) {
+      _addOverlayEvent(
+        _BattleOverlayEvent.impact(
+          serial: ++_visualSerial,
+          direct: _duel.pendingAiAttack!.targetInstanceId == null,
+        ),
+      );
+    }
     _showTransition(
       previousPlayer: previousPlayer,
       previousPhase: previousPhase,
@@ -604,13 +796,6 @@ class _BattleScreenState extends State<BattleScreen> {
 
     if (_duel.awaitingPlayerPriority) {
       return;
-    }
-
-    if (_duel.state.activePlayer == DuelParticipant.player &&
-        actions.isNotEmpty) {
-      _showHudMessage(
-        '${actions.length} action${actions.length > 1 ? 's' : ''} adverse${actions.length > 1 ? 's' : ''}',
-      );
     }
   }
 
@@ -784,6 +969,8 @@ class _BattleScreenState extends State<BattleScreen> {
                             feedbackCardId: _feedbackCardId,
                             feedbackMessage: _feedbackMessage,
                             feedbackToken: _feedbackToken,
+                            floatLabels: _cardFloatLabels,
+                            floatTokens: _cardFloatTokens,
                             activatableIds: activatableIds,
                             validTargetIds: validTargetIds,
                             onCardTap: _tapSupportCard),
@@ -792,9 +979,17 @@ class _BattleScreenState extends State<BattleScreen> {
                             zones: state.aiField.characterZones,
                             opponent: true,
                             controller: _duel,
+                            attackingCardId:
+                                _duel.pendingAiAttack?.attackerInstanceId,
+                            attackAnimationToken:
+                                _duel.pendingAiAttack?.declarationId.hashCode ??
+                                    0,
+                            summoningIds: _summoningCardIds,
                             feedbackCardId: _feedbackCardId,
                             feedbackMessage: _feedbackMessage,
                             feedbackToken: _feedbackToken,
+                            floatLabels: _cardFloatLabels,
+                            floatTokens: _cardFloatTokens,
                             activatableIds: activatableIds,
                             validTargetIds: validTargetIds,
                             onCardTap: _tapOpponentCharacter),
@@ -806,6 +1001,15 @@ class _BattleScreenState extends State<BattleScreen> {
                           feedbackCardId: _feedbackCardId,
                           feedbackMessage: _feedbackMessage,
                           feedbackToken: _feedbackToken,
+                          floatLabel: state.aiField.terrainZone == null
+                              ? null
+                              : _cardFloatLabels[
+                                  state.aiField.terrainZone!.instanceId],
+                          floatToken: state.aiField.terrainZone == null
+                              ? 0
+                              : _cardFloatTokens[
+                                      state.aiField.terrainZone!.instanceId] ??
+                                  0,
                           activatable: activatableIds
                               .contains(state.aiField.terrainZone?.instanceId),
                           validTarget: validTargetIds
@@ -827,6 +1031,9 @@ class _BattleScreenState extends State<BattleScreen> {
                         _ZoneRow(
                             zones: state.playerField.characterZones,
                             controller: _duel,
+                            attackingCardId: _attackingCardId,
+                            attackAnimationToken: _attackAnimationToken,
+                            summoningIds: _summoningCardIds,
                             selectedIds: {
                               ..._selectedSacrifices,
                               if (_selectedAttackerId != null)
@@ -835,6 +1042,8 @@ class _BattleScreenState extends State<BattleScreen> {
                             feedbackCardId: _feedbackCardId,
                             feedbackMessage: _feedbackMessage,
                             feedbackToken: _feedbackToken,
+                            floatLabels: _cardFloatLabels,
+                            floatTokens: _cardFloatTokens,
                             activatableIds: activatableIds,
                             validTargetIds: validTargetIds,
                             onCardTap: _tapOwnCharacter),
@@ -849,6 +1058,8 @@ class _BattleScreenState extends State<BattleScreen> {
                             feedbackCardId: _feedbackCardId,
                             feedbackMessage: _feedbackMessage,
                             feedbackToken: _feedbackToken,
+                            floatLabels: _cardFloatLabels,
+                            floatTokens: _cardFloatTokens,
                             activatableIds: activatableIds,
                             validTargetIds: validTargetIds,
                             onCardTap: _tapSupportCard),
@@ -859,6 +1070,15 @@ class _BattleScreenState extends State<BattleScreen> {
                           feedbackCardId: _feedbackCardId,
                           feedbackMessage: _feedbackMessage,
                           feedbackToken: _feedbackToken,
+                          floatLabel: state.playerField.terrainZone == null
+                              ? null
+                              : _cardFloatLabels[
+                                  state.playerField.terrainZone!.instanceId],
+                          floatToken: state.playerField.terrainZone == null
+                              ? 0
+                              : _cardFloatTokens[state
+                                      .playerField.terrainZone!.instanceId] ??
+                                  0,
                           activatable: activatableIds.contains(
                             state.playerField.terrainZone?.instanceId,
                           ),
@@ -914,24 +1134,8 @@ class _BattleScreenState extends State<BattleScreen> {
                           ],
                         ),
                         if (_duel.lastChainEvents.isNotEmpty)
-                          Card(
-                            color: const Color(0xFF34204A),
-                            child: Padding(
-                              padding: const EdgeInsets.all(10),
-                              child: Row(
-                                children: [
-                                  const Icon(Icons.link),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      _duel.lastChainEvents.join(' → '),
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
+                          _ChainResolutionIndicator(
+                            count: _duel.lastChainEvents.length,
                           ),
                         const SizedBox(height: 10),
                         SizedBox(
@@ -954,6 +1158,9 @@ class _BattleScreenState extends State<BattleScreen> {
                                           ? _feedbackMessage
                                           : null,
                                   feedbackToken: _feedbackToken,
+                                  floatLabel: _cardFloatLabels[card.instanceId],
+                                  floatToken:
+                                      _cardFloatTokens[card.instanceId] ?? 0,
                                   activatable:
                                       activatableIds.contains(card.instanceId),
                                   validTarget:
@@ -1023,6 +1230,15 @@ class _BattleScreenState extends State<BattleScreen> {
               ),
             ),
           ),
+          for (final event in _overlayEvents)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: _BattleEventOverlay(
+                  key: ValueKey('battle-event-${event.serial}'),
+                  event: event,
+                ),
+              ),
+            ),
           if (_duel.awaitingPlayerPriority)
             Positioned(
               right: 18,
@@ -1382,6 +1598,278 @@ class _ChainPassButton extends StatelessWidget {
       );
 }
 
+class _ChainResolutionIndicator extends StatelessWidget {
+  const _ChainResolutionIndicator({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        label: '$count éléments de Chaîne résolus',
+        child: SizedBox(
+          height: 34,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.link_rounded, color: Color(0xFFC990FF)),
+              const SizedBox(width: 6),
+              for (var index = 0; index < count.clamp(1, 6); index++)
+                TweenAnimationBuilder<double>(
+                  duration: Duration(milliseconds: 220 + index * 55),
+                  tween: Tween(begin: .35, end: 1),
+                  builder: (context, value, child) => Transform.scale(
+                    scale: value,
+                    child: child,
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 2),
+                    child: Icon(
+                      Icons.auto_awesome,
+                      size: 13,
+                      color: Color(0xFFE2C2FF),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+}
+
+enum _BattleOverlayKind { impact, life, destruction, mythic }
+
+final class _BattleOverlayEvent {
+  const _BattleOverlayEvent._({
+    required this.serial,
+    required this.kind,
+    this.amount,
+    this.forPlayer,
+    this.label,
+    this.direct,
+  });
+
+  factory _BattleOverlayEvent.life({
+    required int serial,
+    required int amount,
+    required bool forPlayer,
+  }) =>
+      _BattleOverlayEvent._(
+        serial: serial,
+        kind: _BattleOverlayKind.life,
+        amount: amount,
+        forPlayer: forPlayer,
+      );
+
+  factory _BattleOverlayEvent.impact({
+    required int serial,
+    required bool direct,
+  }) =>
+      _BattleOverlayEvent._(
+        serial: serial,
+        kind: _BattleOverlayKind.impact,
+        direct: direct,
+      );
+
+  factory _BattleOverlayEvent.destruction({
+    required int serial,
+    required String label,
+  }) =>
+      _BattleOverlayEvent._(
+        serial: serial,
+        kind: _BattleOverlayKind.destruction,
+        label: label,
+      );
+
+  factory _BattleOverlayEvent.mythic({
+    required int serial,
+    required String label,
+  }) =>
+      _BattleOverlayEvent._(
+        serial: serial,
+        kind: _BattleOverlayKind.mythic,
+        label: label,
+      );
+
+  final int serial;
+  final _BattleOverlayKind kind;
+  final int? amount;
+  final bool? forPlayer;
+  final String? label;
+  final bool? direct;
+}
+
+class _BattleEventOverlay extends StatelessWidget {
+  const _BattleEventOverlay({required this.event, super.key});
+
+  final _BattleOverlayEvent event;
+
+  @override
+  Widget build(BuildContext context) => switch (event.kind) {
+        _BattleOverlayKind.impact => _ImpactFlash(event: event),
+        _BattleOverlayKind.life => _LifeFloat(event: event),
+        _BattleOverlayKind.destruction => _DestructionFloat(event: event),
+        _BattleOverlayKind.mythic => _MythicFlash(event: event),
+      };
+}
+
+class _ImpactFlash extends StatelessWidget {
+  const _ImpactFlash({required this.event});
+
+  final _BattleOverlayEvent event;
+
+  @override
+  Widget build(BuildContext context) => Align(
+        alignment: event.direct! ? const Alignment(0, -.76) : Alignment.center,
+        child: TweenAnimationBuilder<double>(
+          key: const Key('battle-attack-impact'),
+          duration: const Duration(milliseconds: 430),
+          tween: Tween(begin: 0, end: 1),
+          builder: (context, value, child) => Opacity(
+            opacity: math.sin(value * math.pi).clamp(0, 1).toDouble(),
+            child: Transform.scale(
+              scale: .2 + value * 1.6,
+              child: Transform.rotate(angle: value * .45, child: child),
+            ),
+          ),
+          child: const Icon(
+            Icons.brightness_7_rounded,
+            size: 92,
+            color: Color(0xFFFFD56B),
+            shadows: [Shadow(color: Color(0xFFFF553D), blurRadius: 24)],
+          ),
+        ),
+      );
+}
+
+class _LifeFloat extends StatelessWidget {
+  const _LifeFloat({required this.event});
+
+  final _BattleOverlayEvent event;
+
+  @override
+  Widget build(BuildContext context) {
+    final amount = event.amount!;
+    return Align(
+      alignment:
+          event.forPlayer! ? const Alignment(0, .62) : const Alignment(0, -.78),
+      child: TweenAnimationBuilder<double>(
+        key: const Key('battle-life-float'),
+        duration: const Duration(milliseconds: 650),
+        tween: Tween(begin: 0, end: 1),
+        builder: (context, value, child) => Opacity(
+          opacity: (1 - value).clamp(0, 1),
+          child: Transform.translate(
+            offset: Offset(0, -42 * value),
+            child: Transform.scale(scale: .72 + value * .45, child: child),
+          ),
+        ),
+        child: Text(
+          '${amount > 0 ? '+' : ''}$amount',
+          style: TextStyle(
+            color:
+                amount < 0 ? const Color(0xFFFF405C) : const Color(0xFF70F5B9),
+            fontSize: 42,
+            fontWeight: FontWeight.w900,
+            shadows: const [Shadow(color: Colors.black, blurRadius: 8)],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DestructionFloat extends StatelessWidget {
+  const _DestructionFloat({required this.event});
+
+  final _BattleOverlayEvent event;
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: TweenAnimationBuilder<double>(
+          key: const Key('battle-destruction-float'),
+          duration: const Duration(milliseconds: 560),
+          tween: Tween(begin: 0, end: 1),
+          builder: (context, value, child) => Opacity(
+            opacity: (1 - value).clamp(0, 1),
+            child: Transform.translate(
+              offset: Offset(0, 65 * value),
+              child: Transform.rotate(angle: value * .15, child: child),
+            ),
+          ),
+          child: Container(
+            width: 150,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xE8461320),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFFFF5A70)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.auto_delete,
+                    color: Color(0xFFFF8290), size: 34),
+                const SizedBox(height: 5),
+                Text(
+                  event.label!,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+}
+
+class _MythicFlash extends StatelessWidget {
+  const _MythicFlash({required this.event});
+
+  final _BattleOverlayEvent event;
+
+  @override
+  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+        key: const Key('battle-mythic-flash'),
+        duration: const Duration(milliseconds: 620),
+        tween: Tween(begin: 0, end: 1),
+        builder: (context, value, child) => DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: RadialGradient(
+              colors: [
+                const Color(0xFFA947FF)
+                    .withValues(alpha: math.sin(value * math.pi) * .72),
+                Colors.transparent,
+              ],
+            ),
+          ),
+          child: Opacity(
+            opacity: math.sin(value * math.pi).clamp(0, 1),
+            child: Transform.scale(scale: .55 + value * .75, child: child),
+          ),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.auto_awesome, size: 82, color: Colors.white),
+              const Text(
+                'INVOCATION MYTHIQUE',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 2,
+                ),
+              ),
+              const SizedBox(height: 5),
+              Text(event.label!, style: const TextStyle(fontSize: 17)),
+            ],
+          ),
+        ),
+      );
+}
+
 class _TerrainSlot extends StatelessWidget {
   const _TerrainSlot({
     required this.card,
@@ -1391,6 +1879,8 @@ class _TerrainSlot extends StatelessWidget {
     this.feedbackCardId,
     this.feedbackMessage,
     this.feedbackToken = 0,
+    this.floatLabel,
+    this.floatToken = 0,
     this.activatable = false,
     this.validTarget = false,
   });
@@ -1402,6 +1892,8 @@ class _TerrainSlot extends StatelessWidget {
   final String? feedbackCardId;
   final String? feedbackMessage;
   final int feedbackToken;
+  final String? floatLabel;
+  final int floatToken;
   final bool activatable;
   final bool validTarget;
 
@@ -1432,6 +1924,8 @@ class _TerrainSlot extends StatelessWidget {
                         ? feedbackMessage
                         : null,
                     feedbackToken: feedbackToken,
+                    floatLabel: floatLabel,
+                    floatToken: floatToken,
                     activatable: activatable,
                     validTarget: validTarget,
                     onTap: onTap,
@@ -1450,8 +1944,13 @@ class _ZoneRow extends StatelessWidget {
       this.feedbackCardId,
       this.feedbackMessage,
       this.feedbackToken = 0,
+      this.floatLabels = const {},
+      this.floatTokens = const {},
       this.activatableIds = const {},
       this.validTargetIds = const {},
+      this.attackingCardId,
+      this.attackAnimationToken = 0,
+      this.summoningIds = const {},
       this.onCardTap});
   final List<FieldCardInstance?> zones;
   final LocalDuelController controller;
@@ -1460,8 +1959,13 @@ class _ZoneRow extends StatelessWidget {
   final String? feedbackCardId;
   final String? feedbackMessage;
   final int feedbackToken;
+  final Map<String, String> floatLabels;
+  final Map<String, int> floatTokens;
   final Set<String> activatableIds;
   final Set<String> validTargetIds;
+  final String? attackingCardId;
+  final int attackAnimationToken;
+  final Set<String> summoningIds;
   final ValueChanged<FieldCardInstance>? onCardTap;
 
   @override
@@ -1493,10 +1997,17 @@ class _ZoneRow extends StatelessWidget {
                               ? feedbackMessage
                               : null,
                       feedbackToken: feedbackToken,
+                      floatLabel: floatLabels[zones[index]!.instanceId],
+                      floatToken: floatTokens[zones[index]!.instanceId] ?? 0,
                       activatable:
                           activatableIds.contains(zones[index]!.instanceId),
                       validTarget:
                           validTargetIds.contains(zones[index]!.instanceId),
+                      attacking: attackingCardId == zones[index]!.instanceId,
+                      attackDirection: opponent ? 1 : -1,
+                      attackAnimationToken: attackAnimationToken,
+                      justSummoned:
+                          summoningIds.contains(zones[index]!.instanceId),
                       onTap: onCardTap == null
                           ? null
                           : () => onCardTap!(zones[index]!)),
@@ -1515,8 +2026,14 @@ class _DuelCard extends StatefulWidget {
       this.selected = false,
       this.feedbackMessage,
       this.feedbackToken = 0,
+      this.floatLabel,
+      this.floatToken = 0,
       this.activatable = false,
       this.validTarget = false,
+      this.attacking = false,
+      this.attackDirection = -1,
+      this.attackAnimationToken = 0,
+      this.justSummoned = false,
       this.onTap});
   final FieldCardInstance card;
   final LocalCardPresentation presentation;
@@ -1525,8 +2042,14 @@ class _DuelCard extends StatefulWidget {
   final bool selected;
   final String? feedbackMessage;
   final int feedbackToken;
+  final String? floatLabel;
+  final int floatToken;
   final bool activatable;
   final bool validTarget;
+  final bool attacking;
+  final double attackDirection;
+  final int attackAnimationToken;
+  final bool justSummoned;
   final VoidCallback? onTap;
 
   @override
@@ -1542,11 +2065,22 @@ class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
     vsync: this,
     duration: const Duration(milliseconds: 760),
   );
+  late final AnimationController _attackController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 360),
+  );
+  late final AnimationController _entranceController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 480),
+    value: widget.justSummoned ? 0 : 1,
+  );
 
   @override
   void initState() {
     super.initState();
     _syncPulse();
+    if (widget.attacking) _attackController.forward(from: 0);
+    if (widget.justSummoned) _entranceController.forward();
   }
 
   @override
@@ -1560,6 +2094,14 @@ class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
     if (widget.activatable != oldWidget.activatable ||
         widget.validTarget != oldWidget.validTarget) {
       _syncPulse();
+    }
+    if (widget.attacking &&
+        (!oldWidget.attacking ||
+            widget.attackAnimationToken != oldWidget.attackAnimationToken)) {
+      _attackController.forward(from: 0);
+    }
+    if (widget.justSummoned && !oldWidget.justSummoned) {
+      _entranceController.forward(from: 0);
     }
   }
 
@@ -1576,6 +2118,8 @@ class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
   void dispose() {
     _shakeController.dispose();
     _pulseController.dispose();
+    _attackController.dispose();
+    _entranceController.dispose();
     super.dispose();
   }
 
@@ -1585,11 +2129,31 @@ class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
         widget.presentation.category == CardCategory.character ||
             widget.presentation.category == CardCategory.mythic;
     return AnimatedBuilder(
-      animation: Listenable.merge([_shakeController, _pulseController]),
+      animation: Listenable.merge(
+        [
+          _shakeController,
+          _pulseController,
+          _attackController,
+          _entranceController,
+        ],
+      ),
       builder: (context, child) {
         final progress = _shakeController.value;
         final offset = math.sin(progress * math.pi * 6) * (1 - progress) * 7;
-        return Transform.translate(offset: Offset(offset, 0), child: child);
+        final lunge = math.sin(_attackController.value * math.pi) *
+            30 *
+            widget.attackDirection;
+        return Transform.translate(
+          offset: Offset(offset, lunge),
+          child: Opacity(
+            opacity: _entranceController.value,
+            child: Transform.scale(
+              scale: (.55 + _entranceController.value * .45) *
+                  (1 + math.sin(_attackController.value * math.pi) * .08),
+              child: child,
+            ),
+          ),
+        );
       },
       child: SizedBox(
         width: widget.compact ? 68 : 104,
@@ -1708,6 +2272,47 @@ class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
                                       color: Colors.white,
                                       fontSize: widget.compact ? 8 : 10,
                                       fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (widget.floatLabel != null)
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: TweenAnimationBuilder<double>(
+                                key: ValueKey(
+                                  'card-float-${widget.card.instanceId}-${widget.floatToken}',
+                                ),
+                                duration: const Duration(milliseconds: 850),
+                                tween: Tween(begin: 0, end: 1),
+                                builder: (context, value, child) => Opacity(
+                                  opacity: (1 - value).clamp(0, 1),
+                                  child: Transform.translate(
+                                    offset: Offset(0, -22 * value),
+                                    child: child,
+                                  ),
+                                ),
+                                child: Center(
+                                  child: Container(
+                                    key: const Key('battle-card-float'),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                      vertical: 2,
+                                    ),
+                                    color: Colors.black87,
+                                    child: Text(
+                                      widget.floatLabel!,
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        color:
+                                            widget.floatLabel!.startsWith('-')
+                                                ? const Color(0xFFFF7384)
+                                                : const Color(0xFF8CFFD9),
+                                        fontSize: widget.compact ? 8 : 10,
+                                        fontWeight: FontWeight.w900,
+                                      ),
                                     ),
                                   ),
                                 ),
