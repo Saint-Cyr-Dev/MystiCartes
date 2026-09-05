@@ -104,8 +104,14 @@ PlayerFieldState _field({
 }) =>
     PlayerFieldState.empty(participant: participant, deck: const []).copyWith(
       hand: hand,
-      characterZones: [...characters, ...List<CardInstance?>.filled(5 - characters.length, null)],
-      actionTrapZones: [...backrow, ...List<CardInstance?>.filled(5 - backrow.length, null)],
+      characterZones: [
+        ...characters,
+        ...List<CardInstance?>.filled(5 - characters.length, null)
+      ],
+      actionTrapZones: [
+        ...backrow,
+        ...List<CardInstance?>.filled(5 - backrow.length, null)
+      ],
       graveyard: graveyard,
     );
 
@@ -127,9 +133,7 @@ CardInstance _source(String code) {
                     : 'normal',
     faceUp: false,
     position: null,
-    runtimeData: isAction
-        ? const {}
-        : const {CardRuntimeKeys.setOnTurn: 1},
+    runtimeData: isAction ? const {} : const {CardRuntimeKeys.setOnTurn: 1},
   );
 }
 
@@ -156,12 +160,85 @@ ChainLink _enemyLink({
       payload: payload,
     );
 
+final class _TypedLifeLossEffect extends ChainEffectDefinition {
+  const _TypedLifeLossEffect();
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) => [
+        LifePointLossPending(
+          sourceLinkId: link.linkId,
+          participant: DuelParticipant.player,
+          amount: 600,
+        ),
+      ];
+
+  @override
+  DuelState resolve(DuelState state, ChainLink link) => state;
+}
+
+final class _TypedDestructionEffect extends ChainEffectDefinition {
+  const _TypedDestructionEffect(this.cardInstanceId);
+
+  final String cardInstanceId;
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) => [
+        EffectDestructionPending(
+          sourceLinkId: link.linkId,
+          cardInstanceId: cardInstanceId,
+        ),
+      ];
+
+  @override
+  DuelState resolve(DuelState state, ChainLink link) => state;
+}
+
+final class _TypedBanishmentEffect extends ChainEffectDefinition {
+  const _TypedBanishmentEffect(this.cardInstanceId);
+
+  final String cardInstanceId;
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) => [
+        BanishmentPending(
+          sourceLinkId: link.linkId,
+          cardInstanceId: cardInstanceId,
+          fromGraveyard: true,
+        ),
+      ];
+
+  @override
+  DuelState resolve(DuelState state, ChainLink link) => state;
+}
+
+final class _TypedRevealEffect extends ChainEffectDefinition {
+  const _TypedRevealEffect(this.cardInstanceId);
+
+  final String cardInstanceId;
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) => [
+        FaceDownRevealPending(
+          sourceLinkId: link.linkId,
+          cardInstanceIds: [cardInstanceId],
+        ),
+      ];
+
+  @override
+  DuelState resolve(DuelState state, ChainLink link) => state;
+}
+
 _Scenario _attackScenario(String code, DuelEngine engine) {
   final source = _source(code);
-  var target = _card('TARGET', id: 'target', family: 'babi', position: BattlePosition.defense);
+  var target = _card('TARGET',
+      id: 'target', family: 'babi', position: BattlePosition.defense);
   final playerCharacters = <CardInstance?>[target];
   if (code == 'MAS-011') {
-    target = _card('MAS-TARGET', id: 'target', family: 'masque', faceUp: false, position: BattlePosition.defense);
+    target = _card('MAS-TARGET',
+        id: 'target',
+        family: 'masque',
+        faceUp: false,
+        position: BattlePosition.defense);
     playerCharacters
       ..clear()
       ..addAll([target, _card('MAS-ALT', id: 'alternate', family: 'masque')]);
@@ -171,7 +248,8 @@ _Scenario _attackScenario(String code, DuelEngine engine) {
       ..clear()
       ..addAll([target, _card('SAV-ALT', id: 'alternate', family: 'savane')]);
   } else if (code == 'VIL-011') {
-    target = _card('VIL-TARGET', id: 'target', family: 'village', position: BattlePosition.defense);
+    target = _card('VIL-TARGET',
+        id: 'target', family: 'village', position: BattlePosition.defense);
     playerCharacters
       ..clear()
       ..add(target);
@@ -248,57 +326,89 @@ _Scenario _scenario(String code, DuelEngine engine) {
         _card('ROY-TARGET', id: 'protected', family: 'royaume'),
         _card('TRIBUTE', id: 'tribute', family: 'village'),
       ]);
-      chain = _responseChain(_enemyLink(target: ChainTarget(cardInstanceId: 'protected')));
+      chain = _responseChain(
+          _enemyLink(target: ChainTarget(cardInstanceId: 'protected')));
     case 'ROY-012':
-      ownCharacters.add(_card('ROY-TARGET', id: 'protected', family: 'royaume'));
-      chain = _responseChain(_enemyLink(target: ChainTarget(cardInstanceId: 'protected')));
+      ownCharacters
+          .add(_card('ROY-TARGET', id: 'protected', family: 'royaume'));
+      chain = _responseChain(
+          _enemyLink(target: ChainTarget(cardInstanceId: 'protected')));
     case 'ANC-009':
       ownCharacters.add(_card('ANC-ALLY', id: 'ally', family: 'ancêtre'));
-      enemyCharacters.add(_card('ENEMY', id: 'enemy', owner: DuelParticipant.ai));
+      enemyCharacters
+          .add(_card('ENEMY', id: 'enemy', owner: DuelParticipant.ai));
     case 'ANC-011':
-      ownGraveyard.add(_card('ANC-GRAVE', id: 'grave', family: 'ancêtre', rank: 3));
+      ownGraveyard
+          .add(_card('ANC-GRAVE', id: 'grave', family: 'ancêtre', rank: 3));
       context = const ManualActivationContext(destroyedCharacterRank: 5);
     case 'ANC-012':
       ownGraveyard.add(_card('ANC-GRAVE', id: 'grave', family: 'ancêtre'));
-      chain = _responseChain(_enemyLink(target: ChainTarget(cardInstanceId: 'grave')));
+      chain = _responseChain(
+          _enemyLink(target: ChainTarget(cardInstanceId: 'grave')));
     case 'MAS-008':
-      ownCharacters.add(_card('MAS-ALLY', id: 'ally', family: 'masque', faceUp: false, position: BattlePosition.defense));
+      ownCharacters.add(_card('MAS-ALLY',
+          id: 'ally',
+          family: 'masque',
+          faceUp: false,
+          position: BattlePosition.defense));
     case 'MAS-012':
-      ownCharacters.add(_card('MAS-HIDDEN', id: 'hidden', family: 'masque', faceUp: false, position: BattlePosition.defense));
-      chain = _responseChain(_enemyLink(target: ChainTarget(cardInstanceId: 'hidden')));
+      ownCharacters.add(_card('MAS-HIDDEN',
+          id: 'hidden',
+          family: 'masque',
+          faceUp: false,
+          position: BattlePosition.defense));
+      chain = _responseChain(
+          _enemyLink(target: ChainTarget(cardInstanceId: 'hidden')));
     case 'DOZ-009':
-      enemyCharacters.add(_card('PREY', id: 'prey', owner: DuelParticipant.ai, counters: const {'proie': 1}));
+      enemyCharacters.add(_card('PREY',
+          id: 'prey', owner: DuelParticipant.ai, counters: const {'proie': 1}));
     case 'DOZ-012':
-      final prey = _card('PREY', id: 'prey', owner: DuelParticipant.ai, counters: const {'proie': 1});
+      final prey = _card('PREY',
+          id: 'prey', owner: DuelParticipant.ai, counters: const {'proie': 1});
       enemyCharacters.add(prey);
       chain = _responseChain(_enemyLink(sourceId: prey.instanceId));
     case 'FOR-012':
       context = const ManualActivationContext(destroyedWasForest: true);
     case 'LAG-008':
-      ownCharacters.add(_card('LAG-ALLY', id: 'ally', family: 'lagune', rank: 5));
-      enemyCharacters.add(_card('ENEMY', id: 'enemy', owner: DuelParticipant.ai, rank: 4));
+      ownCharacters
+          .add(_card('LAG-ALLY', id: 'ally', family: 'lagune', rank: 5));
+      enemyCharacters
+          .add(_card('ENEMY', id: 'enemy', owner: DuelParticipant.ai, rank: 4));
     case 'LAG-011':
-      enemyCharacters.add(_card('SUMMONED', id: 'summoned', owner: DuelParticipant.ai, rank: 4));
-      context = const ManualActivationContext(summonedOpponentInstanceId: 'summoned');
+      enemyCharacters.add(_card('SUMMONED',
+          id: 'summoned', owner: DuelParticipant.ai, rank: 4));
+      context =
+          const ManualActivationContext(summonedOpponentInstanceId: 'summoned');
     case 'LAG-012':
       ownCharacters.add(_card('LAG-TARGET', id: 'protected', family: 'lagune'));
-      chain = _responseChain(_enemyLink(target: ChainTarget(cardInstanceId: 'protected')));
+      chain = _responseChain(
+          _enemyLink(target: ChainTarget(cardInstanceId: 'protected')));
     case 'SAV-009':
       phase = DuelPhase.battle;
       ownCharacters.add(_card('SAV-ALLY', id: 'ally', family: 'savane'));
     case 'VIL-009':
       ownCharacters.add(_card('VIL-ALLY', id: 'ally', family: 'village'));
     case 'VIL-012':
-      final equipment = _card('EQUIPMENT', id: 'equipment', category: CardCategory.action, subtype: 'equipment', family: 'village', position: null);
+      final equipment = _card('EQUIPMENT',
+          id: 'equipment',
+          category: CardCategory.action,
+          subtype: 'equipment',
+          family: 'village',
+          position: null);
       ownBackrow.add(equipment);
-      chain = _responseChain(_enemyLink(target: ChainTarget(cardInstanceId: equipment.instanceId)));
+      chain = _responseChain(_enemyLink(
+          target: ChainTarget(cardInstanceId: equipment.instanceId)));
     case 'MAQ-009':
-      ownCharacters.add(_card('MAQ-HIGH', id: 'high', family: 'maquis', rank: 5));
-      ownHand.add(_card('MAQ-LOW', id: 'low', family: 'maquis', rank: 3, faceUp: false, position: null));
+      ownCharacters
+          .add(_card('MAQ-HIGH', id: 'high', family: 'maquis', rank: 5));
+      ownHand.add(_card('MAQ-LOW',
+          id: 'low', family: 'maquis', rank: 3, faceUp: false, position: null));
     case 'MAQ-012':
-      ownHand.add(_card('DISCARD', id: 'discard', family: 'babi', faceUp: false, position: null));
+      ownHand.add(_card('DISCARD',
+          id: 'discard', family: 'babi', faceUp: false, position: null));
       chain = _responseChain(_enemyLink());
-      context = const ManualActivationContext(opponentEffectWouldLoseLife: true);
+      context =
+          const ManualActivationContext(opponentEffectWouldLoseLife: true);
   }
 
   return _Scenario(
@@ -335,8 +445,10 @@ void main() {
         participant: DuelParticipant.player,
         context: scenario.context,
       );
-      final option = options.where((item) => item.source.cardCode == code).firstOrNull;
-      expect(option, isNotNull, reason: 'Aucune activation légale préparée pour $code');
+      final option =
+          options.where((item) => item.source.cardCode == code).firstOrNull;
+      expect(option, isNotNull,
+          reason: 'Aucune activation légale préparée pour $code');
       final activation = engine.activateCard(
         state: scenario.state,
         participant: DuelParticipant.player,
@@ -347,7 +459,8 @@ void main() {
     });
   }
 
-  test('un effet automatique de retournement n’apparaît jamais dans la fenêtre', () {
+  test('un effet automatique de retournement n’apparaît jamais dans la fenêtre',
+      () {
     final engine = DuelEngine(chainEffects: V2EffectRegistry.create());
     final automatic = _card(
       'MAS-001',
@@ -373,7 +486,211 @@ void main() {
       state: state,
       participant: DuelParticipant.player,
     );
-    expect(options.where((option) => option.source.cardCode == 'MAS-001'), isEmpty);
+    expect(options.where((option) => option.source.cardCode == 'MAS-001'),
+        isEmpty);
+  });
+
+  test('le moteur expose les menaces typées des effets de production', () {
+    final engine = DuelEngine(chainEffects: V2EffectRegistry.create());
+    final emptyPlayer = _field(participant: DuelParticipant.player);
+    final emptyAi = _field(participant: DuelParticipant.ai);
+
+    DuelState withLink(ChainLink link) => DuelState(
+          playerField: emptyPlayer,
+          aiField: emptyAi,
+          chain: _responseChain(link),
+        );
+
+    final revealLink = ChainLink(
+      linkId: 'reveal',
+      effectKey: MasqueEffectKeys.mas009,
+      activatingPlayer: DuelParticipant.ai,
+      speed: ChainSpeed.speed1,
+      payload: const {
+        'reveal_instance_ids': ['hidden-a', 'hidden-b'],
+      },
+    );
+    final reveal = engine
+        .pendingEventsForCurrentChain(withLink(revealLink))
+        .single as FaceDownRevealPending;
+    expect(reveal.cardInstanceIds, {'hidden-a', 'hidden-b'});
+
+    final destructionLink = ChainLink(
+      linkId: 'destroy',
+      effectKey: LaguneEffectKeys.lag007,
+      activatingPlayer: DuelParticipant.ai,
+      speed: ChainSpeed.speed1,
+      target: ChainTarget(cardInstanceId: 'threatened-card'),
+    );
+    final destruction = engine
+        .pendingEventsForCurrentChain(withLink(destructionLink))
+        .single as EffectDestructionPending;
+    expect(destruction.cardInstanceId, 'threatened-card');
+
+    final banishLink = ChainLink(
+      linkId: 'banish',
+      effectKey: DozoEffectKeys.doz015,
+      activatingPlayer: DuelParticipant.ai,
+      speed: ChainSpeed.speed1,
+      target: ChainTarget(cardInstanceId: 'banished-card'),
+    );
+    final banishment = engine
+        .pendingEventsForCurrentChain(withLink(banishLink))
+        .single as BanishmentPending;
+    expect(banishment.cardInstanceId, 'banished-card');
+    expect(banishment.fromGraveyard, isFalse);
+  });
+
+  test('une perte de PV typée propose automatiquement MAQ-012', () {
+    final effects = {
+      ...V2EffectRegistry.create(),
+      'typed-life-loss': const _TypedLifeLossEffect(),
+    };
+    final engine = DuelEngine(chainEffects: effects);
+    final trap = _source('MAQ-012');
+    final discard = _card(
+      'DISCARD',
+      id: 'discard-for-maq',
+      family: 'babi',
+      faceUp: false,
+      position: null,
+    );
+    final threat = ChainLink(
+      linkId: 'life-loss-link',
+      effectKey: 'typed-life-loss',
+      activatingPlayer: DuelParticipant.ai,
+      speed: ChainSpeed.speed1,
+    );
+    final state = DuelState(
+      turnNumber: 2,
+      playerField: _field(
+        participant: DuelParticipant.player,
+        hand: [discard],
+        backrow: [trap],
+      ),
+      aiField: _field(participant: DuelParticipant.ai),
+      chain: _responseChain(threat),
+    );
+
+    final option = ManualActivationPlanner(engine)
+        .legalOptions(
+          state: state,
+          participant: DuelParticipant.player,
+        )
+        .singleWhere((candidate) => candidate.source.cardCode == 'MAQ-012');
+
+    expect(option.link.payload['target_link_id'], threat.linkId);
+    expect(option.link.payload['discard_instance_id'], discard.instanceId);
+  });
+
+  test('un bannissement typé propose ANC-012 sans payload conventionnel', () {
+    const effectKey = 'typed-banishment';
+    final effects = {
+      ...V2EffectRegistry.create(),
+      effectKey: const _TypedBanishmentEffect('ancestor-in-grave'),
+    };
+    final engine = DuelEngine(chainEffects: effects);
+    final threat = ChainLink(
+      linkId: 'banishment-link',
+      effectKey: effectKey,
+      activatingPlayer: DuelParticipant.ai,
+      speed: ChainSpeed.speed1,
+    );
+    final state = DuelState(
+      turnNumber: 2,
+      playerField: _field(
+        participant: DuelParticipant.player,
+        backrow: [_source('ANC-012')],
+        graveyard: [
+          _card('ANC-GRAVE', id: 'ancestor-in-grave', family: 'ancêtre'),
+        ],
+      ),
+      aiField: _field(participant: DuelParticipant.ai),
+      chain: _responseChain(threat),
+    );
+
+    final option = ManualActivationPlanner(engine)
+        .legalOptions(state: state, participant: DuelParticipant.player)
+        .singleWhere((candidate) => candidate.source.cardCode == 'ANC-012');
+
+    expect(option.link.payload['target_link_id'], threat.linkId);
+    expect(option.link.payload['threatened_graveyard_instance_id'],
+        'ancestor-in-grave');
+  });
+
+  test('une révélation typée propose MAS-012 sans payload conventionnel', () {
+    const effectKey = 'typed-reveal';
+    final effects = {
+      ...V2EffectRegistry.create(),
+      effectKey: const _TypedRevealEffect('hidden-mask'),
+    };
+    final engine = DuelEngine(chainEffects: effects);
+    final threat = ChainLink(
+      linkId: 'reveal-link',
+      effectKey: effectKey,
+      activatingPlayer: DuelParticipant.ai,
+      speed: ChainSpeed.speed1,
+    );
+    final state = DuelState(
+      turnNumber: 2,
+      playerField: _field(
+        participant: DuelParticipant.player,
+        characters: [
+          _card(
+            'MAS-HIDDEN',
+            id: 'hidden-mask',
+            family: 'masque',
+            faceUp: false,
+            position: BattlePosition.defense,
+          ),
+        ],
+        backrow: [_source('MAS-012')],
+      ),
+      aiField: _field(participant: DuelParticipant.ai),
+      chain: _responseChain(threat),
+    );
+
+    final option = ManualActivationPlanner(engine)
+        .legalOptions(state: state, participant: DuelParticipant.player)
+        .singleWhere((candidate) => candidate.source.cardCode == 'MAS-012');
+
+    expect(option.link.payload['target_link_id'], threat.linkId);
+    expect(option.link.payload['threatened_face_down_instance_ids'],
+        ['hidden-mask']);
+  });
+
+  test('une destruction typée propose LAG-012 sans cible conventionnelle', () {
+    const effectKey = 'typed-destruction';
+    final effects = {
+      ...V2EffectRegistry.create(),
+      effectKey: const _TypedDestructionEffect('protected-lagune'),
+    };
+    final engine = DuelEngine(chainEffects: effects);
+    final threat = ChainLink(
+      linkId: 'destruction-link',
+      effectKey: effectKey,
+      activatingPlayer: DuelParticipant.ai,
+      speed: ChainSpeed.speed1,
+    );
+    final state = DuelState(
+      turnNumber: 2,
+      playerField: _field(
+        participant: DuelParticipant.player,
+        characters: [
+          _card('LAG-TARGET', id: 'protected-lagune', family: 'lagune'),
+        ],
+        backrow: [_source('LAG-012')],
+      ),
+      aiField: _field(participant: DuelParticipant.ai),
+      chain: _responseChain(threat),
+    );
+
+    final option = ManualActivationPlanner(engine)
+        .legalOptions(state: state, participant: DuelParticipant.player)
+        .singleWhere((candidate) => candidate.source.cardCode == 'LAG-012');
+
+    expect(option.link.target?.cardInstanceId, 'protected-lagune');
+    expect(option.link.payload['target_link_id'], threat.linkId);
   });
 
   test('une cible posée adverse est préparée sans logique UI spécifique', () {
@@ -464,7 +781,8 @@ void main() {
     expect(result.state.playerField.banished, hasLength(2));
   });
 
-  test('les IA débutante, avancée et experte utilisent une Action rapide Forêt', () {
+  test('les IA débutante, avancée et experte utilisent une Action rapide Forêt',
+      () {
     final engine = DuelEngine(chainEffects: V2EffectRegistry.create());
     final quick = _card(
       'FOR-008',
@@ -499,10 +817,12 @@ void main() {
     ]) {
       final ai = createDuelAi(difficulty: difficulty, engine: engine);
       expect(
-        ai.chooseChainActivation(
-          state: state,
-          availableActivations: links,
-        )?.sourceCardCode,
+        ai
+            .chooseChainActivation(
+              state: state,
+              availableActivations: links,
+            )
+            ?.sourceCardCode,
         'FOR-008',
         reason: difficulty.name,
       );
@@ -566,10 +886,12 @@ void main() {
       engine: engine,
     );
     expect(
-      ai.chooseChainActivation(
-        state: declaration.state,
-        availableActivations: links,
-      )?.sourceCardCode,
+      ai
+          .chooseChainActivation(
+            state: declaration.state,
+            availableActivations: links,
+          )
+          ?.sourceCardCode,
       'FOR-011',
     );
   });

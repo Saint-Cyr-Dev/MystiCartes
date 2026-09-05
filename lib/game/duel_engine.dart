@@ -69,6 +69,15 @@ abstract class ChainEffectDefinition {
 
   ChainLink prepareLink(DuelState state, ChainLink link) => link;
 
+  /// Décrit les conséquences auxquelles l'adversaire peut répondre avant la
+  /// résolution. Une nouvelle carte expose ici ses événements rares sans
+  /// imposer de modification au contrôleur Flutter.
+  Iterable<PendingDuelEvent> pendingEvents(
+    DuelState state,
+    ChainLink link,
+  ) =>
+      const [];
+
   bool canActivate(DuelState state, ChainLink link) => true;
 
   DuelState payCost(DuelState state, ChainLink link) => state;
@@ -288,6 +297,15 @@ final class DuelEngine {
 
   final Map<String, ChainEffectDefinition> _chainEffects;
   final CombatFlipTriggerLinkFactory? _combatFlipTriggerLinkFactory;
+
+  /// Événements typés annoncés par le dernier maillon de la Chaîne.
+  List<PendingDuelEvent> pendingEventsForCurrentChain(DuelState state) {
+    if (!state.chain.isOpen || state.chain.links.isEmpty) return const [];
+    final link = state.chain.links.last;
+    final definition = _chainEffects[link.effectKey];
+    if (definition == null) return const [];
+    return List.unmodifiable(definition.pendingEvents(state, link));
+  }
 
   /// Résout une destruction causée par un effet, après sa fenêtre de réponse.
   ///

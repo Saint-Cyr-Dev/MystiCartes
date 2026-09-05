@@ -17,6 +17,40 @@ final class _ZeroRandom implements AiRandomSource {
   int nextInt(int max) => 0;
 }
 
+final class _AttackResponderAi implements DuelAiStrategy {
+  const _AttackResponderAi();
+
+  @override
+  AiDifficulty get difficulty => AiDifficulty.beginner;
+
+  @override
+  ChainLink? chooseChainActivation({
+    required DuelState state,
+    required List<ChainLink> availableActivations,
+  }) {
+    // Répond à la déclaration d'attaque, puis passe après la contre-réponse
+    // du joueur afin de permettre les deux passes réglementaires.
+    return state.chain.links.isEmpty && availableActivations.isNotEmpty
+        ? availableActivations.first
+        : null;
+  }
+
+  @override
+  AttackDeclarationResult? declareAttack(DuelState state) => null;
+
+  @override
+  DuelActionResult? discardExcessHand(DuelState state) => null;
+
+  @override
+  DuelAiTurnResult playTurn(DuelState state) => DuelAiTurnResult(state: state);
+
+  @override
+  DuelActionResult? playMainMonster(DuelState state) => null;
+
+  @override
+  DuelActionResult? setBackrow(DuelState state) => null;
+}
+
 CardInstance _card({
   required String id,
   required String code,
@@ -133,5 +167,113 @@ void main() {
     expect(resolvedAttacker.position, BattlePosition.defense);
     expect(resolvedAttacker.attackedThisTurn, isTrue);
     expect(controller.lastChainEvents.join(' '), contains('Résolu'));
+  });
+
+  test(
+      'une réponse IA à une attaque rend la priorité au joueur avant résolution',
+      () {
+    final engine = DuelEngine(chainEffects: V2EffectRegistry.create());
+    final attacker = _card(
+      id: 'player-attacker',
+      code: 'BAB-003',
+      owner: DuelParticipant.player,
+      category: CardCategory.character,
+      atk: 1800,
+      def: 1700,
+      position: BattlePosition.attack,
+      zoneIndex: 0,
+    );
+    final quickAction = _card(
+      id: 'player-quick',
+      code: 'BAB-008',
+      owner: DuelParticipant.player,
+      category: CardCategory.action,
+      subtype: 'quick',
+      effectKey: BabiEffectKeys.bab008,
+    );
+    final aiTrap = _card(
+      id: 'ai-trap',
+      code: 'BAB-011',
+      owner: DuelParticipant.ai,
+      category: CardCategory.trap,
+      subtype: 'normal',
+      effectKey: BabiEffectKeys.bab011,
+      faceUp: false,
+      zoneIndex: 0,
+    );
+    final state = DuelState(
+      turnNumber: 2,
+      activePlayer: DuelParticipant.player,
+      currentPhase: DuelPhase.battle,
+      playerField: PlayerFieldState.empty(
+        participant: DuelParticipant.player,
+        deck: const [],
+      ).copyWith(
+        hand: [quickAction],
+        characterZones: [attacker, null, null, null, null],
+      ),
+      aiField: PlayerFieldState.empty(
+        participant: DuelParticipant.ai,
+        deck: const [],
+      ).copyWith(actionTrapZones: [aiTrap, null, null, null, null]),
+    );
+    final controller = LocalDuelController.forTesting(
+      engine: engine,
+      ai: const _AttackResponderAi(),
+      presentations: const {
+        'BAB-003': LocalCardPresentation(
+          code: 'BAB-003',
+          name: 'Gardien du Carrefour',
+          category: CardCategory.character,
+          family: 'Babi',
+          attribute: 'Terre',
+          rank: 4,
+          atk: 1800,
+          def: 1700,
+        ),
+        'BAB-008': LocalCardPresentation(
+          code: 'BAB-008',
+          name: 'Trajet Express',
+          category: CardCategory.action,
+          family: 'Babi',
+          attribute: 'Vent',
+          subtype: 'quick',
+          effectKey: BabiEffectKeys.bab008,
+        ),
+        'BAB-011': LocalCardPresentation(
+          code: 'BAB-011',
+          name: 'Feu Rouge Mystique',
+          category: CardCategory.trap,
+          family: 'Babi',
+          attribute: 'Feu',
+          subtype: 'normal',
+          effectKey: BabiEffectKeys.bab011,
+        ),
+      },
+      state: state,
+    );
+
+    final attack = controller.attack(attackerInstanceId: attacker.instanceId);
+
+    expect(attack.succeeded, isTrue);
+    expect(controller.pendingPlayerAttack, isNotNull);
+    expect(controller.awaitingPlayerPriority, isTrue);
+    expect(controller.state.chain.links.single.sourceCardCode, 'BAB-011');
+
+    final counterResponse = controller.availablePlayerResponses().singleWhere(
+          (option) => option.card.cardCode == 'BAB-008',
+        );
+    expect(
+      controller.activatePlayerResponse(option: counterResponse).succeeded,
+      isTrue,
+    );
+    expect(controller.awaitingPlayerPriority, isTrue);
+    expect(controller.state.chain.links, hasLength(2));
+
+    expect(controller.passPlayerPriority().succeeded, isTrue);
+    expect(controller.state.chain.isOpen, isFalse);
+    expect(controller.pendingPlayerAttack, isNull);
+    expect(controller.state.playerLifePoints, 8000);
+    expect(controller.state.aiLifePoints, 8000);
   });
 }

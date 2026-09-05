@@ -62,18 +62,24 @@ typedef _StateLinkReducer = DuelState Function(
   DuelState state,
   ChainLink link,
 );
+typedef _PendingEventsCallback = Iterable<PendingDuelEvent> Function(
+  DuelState state,
+  ChainLink link,
+);
 
 final class _FunctionalRoyaumeEffect extends ChainEffectDefinition {
   const _FunctionalRoyaumeEffect({
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
+    this.onPendingEvents,
     required this.onResolve,
   });
 
   final _StateLinkPredicate? onCanActivate;
   final _StateLinkReducer? onPayCost;
   final _StateLinkPredicate? onTargetLegal;
+  final _PendingEventsCallback? onPendingEvents;
   final _StateLinkReducer onResolve;
 
   @override
@@ -90,6 +96,10 @@ final class _FunctionalRoyaumeEffect extends ChainEffectDefinition {
   bool isTargetLegal(DuelState state, ChainLink link) {
     return onTargetLegal?.call(state, link) ?? link.target == null;
   }
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) =>
+      onPendingEvents?.call(state, link) ?? const [];
 
   @override
   DuelState resolve(DuelState state, ChainLink link) {
@@ -423,6 +433,17 @@ final class RoyaumeEffectRegistry {
 
   static ChainEffectDefinition _roy012() {
     return _FunctionalRoyaumeEffect(
+      onPendingEvents: (state, link) {
+        final id = _targetedChainLink(state, link)?.sourceCardInstanceId;
+        return id == null
+            ? const []
+            : [
+                EffectDestructionPending(
+                  sourceLinkId: link.linkId,
+                  cardInstanceId: id,
+                ),
+              ];
+      },
       onCanActivate: (state, link) {
         final targetLink = _targetedChainLink(state, link);
         if (!_sourceHasCode(state, link, 'ROY-012') ||
@@ -543,6 +564,18 @@ final class RoyaumeEffectRegistry {
   static ChainEffectDefinition _roy015() {
     const usageKey = '${RoyaumeEffectKeys.roy015}:negate_speed2';
     return _FunctionalRoyaumeEffect(
+      onPendingEvents: (state, link) {
+        if (link.payload['trigger'] == 'on_summon') return const [];
+        final id = _targetedChainLink(state, link)?.sourceCardInstanceId;
+        return id == null
+            ? const []
+            : [
+                EffectDestructionPending(
+                  sourceLinkId: link.linkId,
+                  cardInstanceId: id,
+                ),
+              ];
+      },
       onCanActivate: (state, link) {
         final source = _sourceCard(state, link);
         if (source?.cardCode != 'ROY-015') return false;

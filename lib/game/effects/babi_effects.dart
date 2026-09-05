@@ -58,6 +58,10 @@ final class DefaultBabiFusionSummonExtension
 typedef _StateCallback = DuelState Function(DuelState state, ChainLink link);
 typedef _LegalityCallback = bool Function(DuelState state, ChainLink link);
 typedef _PrepareCallback = ChainLink Function(DuelState state, ChainLink link);
+typedef _PendingEventsCallback = Iterable<PendingDuelEvent> Function(
+  DuelState state,
+  ChainLink link,
+);
 
 final class _FunctionalBabiEffect extends ChainEffectDefinition {
   const _FunctionalBabiEffect({
@@ -66,6 +70,7 @@ final class _FunctionalBabiEffect extends ChainEffectDefinition {
     this.onTargetLegal,
     this.onPayCost,
     this.onPrepare,
+    this.onPendingEvents,
   });
 
   final _StateCallback onResolve;
@@ -73,11 +78,16 @@ final class _FunctionalBabiEffect extends ChainEffectDefinition {
   final _LegalityCallback? onTargetLegal;
   final _StateCallback? onPayCost;
   final _PrepareCallback? onPrepare;
+  final _PendingEventsCallback? onPendingEvents;
 
   @override
   ChainLink prepareLink(DuelState state, ChainLink link) {
     return onPrepare?.call(state, link) ?? link;
   }
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) =>
+      onPendingEvents?.call(state, link) ?? const [];
 
   @override
   bool canActivate(DuelState state, ChainLink link) {
@@ -431,6 +441,18 @@ final class BabiEffectRegistry {
 
   static ChainEffectDefinition _bab012() {
     return _FunctionalBabiEffect(
+      onPendingEvents: (state, link) {
+        final sourceId =
+            _targetedChainLink(state, link)?.sourceCardInstanceId;
+        return sourceId == null
+            ? const []
+            : [
+                EffectDestructionPending(
+                  sourceLinkId: link.linkId,
+                  cardInstanceId: sourceId,
+                ),
+              ];
+      },
       onCanActivate: (state, link) {
         final targetLink = _targetedChainLink(state, link);
         final discardId = link.payload['discard_instance_id'] as String?;

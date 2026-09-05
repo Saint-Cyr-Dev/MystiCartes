@@ -51,12 +51,23 @@ final class DefaultMaquisAncestralSummonExtension
 
 typedef _Predicate = bool Function(DuelState, ChainLink);
 typedef _Reducer = DuelState Function(DuelState, ChainLink);
+typedef _PendingEvents = Iterable<PendingDuelEvent> Function(
+  DuelState state,
+  ChainLink link,
+);
 
 final class _Effect extends ChainEffectDefinition {
-  const _Effect({this.can, this.cost, this.legal, required this.resolveEffect});
+  const _Effect({
+    this.can,
+    this.cost,
+    this.legal,
+    this.events,
+    required this.resolveEffect,
+  });
   final _Predicate? can;
   final _Reducer? cost;
   final _Predicate? legal;
+  final _PendingEvents? events;
   final _Reducer resolveEffect;
   @override
   bool canActivate(DuelState state, ChainLink link) =>
@@ -67,6 +78,9 @@ final class _Effect extends ChainEffectDefinition {
   @override
   bool isTargetLegal(DuelState state, ChainLink link) =>
       legal?.call(state, link) ?? link.target == null;
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) =>
+      events?.call(state, link) ?? const [];
   @override
   DuelState resolve(DuelState state, ChainLink link) =>
       resolveEffect(state, link);
@@ -448,6 +462,16 @@ final class MaquisEffectRegistry {
   static ChainEffectDefinition _maq015() {
     const usage = '${MaquisEffectKeys.maq015}:second_action';
     return _Effect(
+      events: (state, link) =>
+          link.payload['mode'] == 'second_action_resolved' &&
+                  link.target != null
+              ? [
+                  EffectDestructionPending(
+                    sourceLinkId: link.linkId,
+                    cardInstanceId: link.target!.cardInstanceId,
+                  ),
+                ]
+              : const [],
       can: (state, link) {
         final source = _source(state, link);
         if (source?.cardCode != 'MAQ-015') return false;

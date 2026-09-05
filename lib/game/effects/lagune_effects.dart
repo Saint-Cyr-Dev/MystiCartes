@@ -52,18 +52,24 @@ final class DefaultLaguneAncestralSummonExtension
 
 typedef _Predicate = bool Function(DuelState state, ChainLink link);
 typedef _Reducer = DuelState Function(DuelState state, ChainLink link);
+typedef _PendingEvents = Iterable<PendingDuelEvent> Function(
+  DuelState state,
+  ChainLink link,
+);
 
 final class _FunctionalLaguneEffect extends ChainEffectDefinition {
   const _FunctionalLaguneEffect({
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
+    this.onPendingEvents,
     required this.onResolve,
   });
 
   final _Predicate? onCanActivate;
   final _Reducer? onPayCost;
   final _Predicate? onTargetLegal;
+  final _PendingEvents? onPendingEvents;
   final _Reducer onResolve;
 
   @override
@@ -77,6 +83,10 @@ final class _FunctionalLaguneEffect extends ChainEffectDefinition {
   @override
   bool isTargetLegal(DuelState state, ChainLink link) =>
       onTargetLegal?.call(state, link) ?? link.target == null;
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) =>
+      onPendingEvents?.call(state, link) ?? const [];
 
   @override
   DuelState resolve(DuelState state, ChainLink link) => onResolve(state, link);
@@ -254,6 +264,14 @@ final class LaguneEffectRegistry {
   static ChainEffectDefinition _lag007() {
     const usageKey = '${LaguneEffectKeys.lag007}:return_destroy';
     return _FunctionalLaguneEffect(
+      onPendingEvents: (state, link) => link.target == null
+          ? const []
+          : [
+              EffectDestructionPending(
+                sourceLinkId: link.linkId,
+                cardInstanceId: link.target!.cardInstanceId,
+              ),
+            ],
       onCanActivate: (state, link) {
         final source = _sourceCard(state, link);
         final returned = _findFieldCard(
@@ -419,12 +437,14 @@ final class LaguneEffectRegistry {
         if (!_sourceHasCode(state, link, 'LAG-012')) return false;
         final protected = _findFieldCard(state, link.target?.cardInstanceId);
         final targeted = _targetedChainLink(state, link);
+        final threatenedId = link.payload['threatened_instance_id'] as String?;
         return protected != null &&
             protected.card.controller == link.activatingPlayer &&
             protected.card.hasFamily('lagune') &&
             targeted != null &&
             targeted.activatingPlayer != link.activatingPlayer &&
-            targeted.target?.cardInstanceId == protected.card.instanceId &&
+            (targeted.target?.cardInstanceId == protected.card.instanceId ||
+                threatenedId == protected.card.instanceId) &&
             _canBeReturnedBy(state, protected, link.activatingPlayer);
       },
       onTargetLegal: (state, link) =>

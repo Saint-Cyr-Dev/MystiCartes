@@ -75,18 +75,24 @@ typedef _StateLinkReducer = DuelState Function(
   DuelState state,
   ChainLink link,
 );
+typedef _PendingEventsCallback = Iterable<PendingDuelEvent> Function(
+  DuelState state,
+  ChainLink link,
+);
 
 final class _FunctionalAncetreEffect extends ChainEffectDefinition {
   const _FunctionalAncetreEffect({
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
+    this.onPendingEvents,
     required this.onResolve,
   });
 
   final _StateLinkPredicate? onCanActivate;
   final _StateLinkReducer? onPayCost;
   final _StateLinkPredicate? onTargetLegal;
+  final _PendingEventsCallback? onPendingEvents;
   final _StateLinkReducer onResolve;
 
   @override
@@ -103,6 +109,10 @@ final class _FunctionalAncetreEffect extends ChainEffectDefinition {
   bool isTargetLegal(DuelState state, ChainLink link) {
     return onTargetLegal?.call(state, link) ?? link.target == null;
   }
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) =>
+      onPendingEvents?.call(state, link) ?? const [];
 
   @override
   DuelState resolve(DuelState state, ChainLink link) {
@@ -440,6 +450,17 @@ final class AncetreEffectRegistry {
 
   static ChainEffectDefinition _anc012() {
     return _FunctionalAncetreEffect(
+      onPendingEvents: (state, link) {
+        final id = _targetedChainLink(state, link)?.sourceCardInstanceId;
+        return id == null
+            ? const []
+            : [
+                EffectDestructionPending(
+                  sourceLinkId: link.linkId,
+                  cardInstanceId: id,
+                ),
+              ];
+      },
       onCanActivate: (state, link) {
         final targetLink = _targetedChainLink(state, link);
         if (!_sourceHasCode(state, link, 'ANC-012') ||
@@ -448,8 +469,10 @@ final class AncetreEffectRegistry {
             targetLink.activatingPlayer == link.activatingPlayer) {
           return false;
         }
-        final graveyardTargetId = targetLink.target?.cardInstanceId ??
-            targetLink.payload['graveyard_instance_id'] as String?;
+        final graveyardTargetId =
+            link.payload['threatened_graveyard_instance_id'] as String? ??
+                targetLink.target?.cardInstanceId ??
+                targetLink.payload['graveyard_instance_id'] as String?;
         return _graveyardCard(
               state,
               link.activatingPlayer,

@@ -51,12 +51,23 @@ final class DefaultVillageFusionSummonExtension
 
 typedef _Predicate = bool Function(DuelState, ChainLink);
 typedef _Reducer = DuelState Function(DuelState, ChainLink);
+typedef _PendingEvents = Iterable<PendingDuelEvent> Function(
+  DuelState state,
+  ChainLink link,
+);
 
 final class _Effect extends ChainEffectDefinition {
-  const _Effect({this.can, this.cost, this.legal, required this.effect});
+  const _Effect({
+    this.can,
+    this.cost,
+    this.legal,
+    this.events,
+    required this.effect,
+  });
   final _Predicate? can;
   final _Reducer? cost;
   final _Predicate? legal;
+  final _PendingEvents? events;
   final _Reducer effect;
   @override
   bool canActivate(DuelState state, ChainLink link) =>
@@ -67,6 +78,9 @@ final class _Effect extends ChainEffectDefinition {
   @override
   bool isTargetLegal(DuelState state, ChainLink link) =>
       legal?.call(state, link) ?? link.target == null;
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) =>
+      events?.call(state, link) ?? const [];
   @override
   DuelState resolve(DuelState state, ChainLink link) => effect(state, link);
 }
@@ -408,6 +422,17 @@ final class VillageEffectRegistry {
       );
 
   static ChainEffectDefinition _vil012() => _Effect(
+        events: (state, link) {
+          final id = _targetLink(state, link)?.sourceCardInstanceId;
+          return id == null
+              ? const []
+              : [
+                  EffectDestructionPending(
+                    sourceLinkId: link.linkId,
+                    cardInstanceId: id,
+                  ),
+                ];
+        },
         can: (state, link) {
           final source = _source(state, link);
           final targeted = _targetLink(state, link);

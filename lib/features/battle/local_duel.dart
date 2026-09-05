@@ -186,8 +186,8 @@ final class LocalDuelController {
   final DuelAiStrategy ai;
   final Map<String, LocalCardPresentation> presentations;
   DuelState state;
-  int _linkSerial = 0;
   AttackDeclaration? _pendingAiAttack;
+  AttackDeclaration? _pendingPlayerAttack;
   int _aiMainActionsTurn = -1;
   bool _aiMonsterActionDone = false;
   bool _aiBackrowActionDone = false;
@@ -200,6 +200,11 @@ final class LocalDuelController {
       !state.isFinished;
 
   AttackDeclaration? get pendingAiAttack => _pendingAiAttack;
+
+  /// Attaque du joueur dont le calcul attend la fermeture normale de la
+  /// fenêtre de réponse. Elle reste en suspens tant que les deux joueurs
+  /// n'ont pas passé consécutivement.
+  AttackDeclaration? get pendingPlayerAttack => _pendingPlayerAttack;
 
   ManualActivationContext get _currentResponseContext =>
       _pendingAiAttack == null
@@ -263,63 +268,6 @@ final class LocalDuelController {
     _responseContext = const ManualActivationContext();
     _playAiPriorityOnce();
     return const LocalDuelActionResult(true, 'Carte posée face cachée.');
-  }
-
-  LocalDuelActionResult activateEffect({
-    required String cardInstanceId,
-    String? targetInstanceId,
-    Map<String, Object?> payload = const {},
-    bool resolveImmediately = true,
-  }) {
-    final source = _findPlayerCard(cardInstanceId);
-    if (source == null || source.effectKey == null) {
-      return const LocalDuelActionResult(
-          false, 'Cette carte n’a aucun effet activable.');
-    }
-    final speed = switch ((source.category, source.subtype)) {
-      (CardCategory.trap, 'counter') => ChainSpeed.speed3,
-      (CardCategory.trap, _) ||
-      (CardCategory.action, 'quick') =>
-        ChainSpeed.speed2,
-      _ => ChainSpeed.speed1,
-    };
-    final link = ChainLink(
-      linkId: 'ui:${source.instanceId}:${state.turnNumber}:${_linkSerial++}',
-      effectKey: source.effectKey!,
-      activatingPlayer: DuelParticipant.player,
-      speed: speed,
-      sourceCardInstanceId: source.instanceId,
-      sourceCardCode: source.cardCode,
-      target: targetInstanceId == null
-          ? null
-          : ChainTarget(cardInstanceId: targetInstanceId),
-      payload: payload,
-    );
-    final result = engine.activateCard(
-      state: state,
-      participant: DuelParticipant.player,
-      cardInstanceId: cardInstanceId,
-      link: link,
-    );
-    if (!result.succeeded) return _failure(result.failure);
-    lastChainEvents = ['Activation : ${presentationOf(source).name}'];
-    state = resolveImmediately
-        ? _settleWindow(result.state, recordResolution: true)
-        : result.state;
-    if (!resolveImmediately &&
-        state.chain.priorityPlayer == DuelParticipant.ai) {
-      final aiPass = engine.passPriority(
-        state: state,
-        participant: DuelParticipant.ai,
-      );
-      if (aiPass.succeeded) state = aiPass.state;
-    }
-    return LocalDuelActionResult(
-      true,
-      resolveImmediately
-          ? 'Effet activé et Chaîne résolue.'
-          : 'Effet ajouté à la Chaîne.',
-    );
   }
 
   List<LocalChainResponseOption> availablePlayerResponses() {
@@ -429,7 +377,10 @@ final class LocalDuelController {
       state: state,
       participant: DuelParticipant.ai,
     );
-    if (passed.succeeded) state = passed.state;
+    if (passed.succeeded) {
+      _recordPassResolution(passed);
+      state = passed.state;
+    }
   }
 
   LocalDuelActionResult passPlayerPriority() {
@@ -443,7 +394,15 @@ final class LocalDuelController {
     if (!result.succeeded) return _failure(result.failure);
     _recordPassResolution(result);
     state = result.state;
+    if (state.chain.isOpen &&
+        state.chain.priorityPlayer == DuelParticipant.ai) {
+      _playAiPriorityOnce();
+    }
+    _autoPassPlayerWhenNoResponseExists();
     if (!state.chain.isOpen) {
+      _resolvePendingPlayerAttack();
+    }
+    if (!state.chain.isOpen && _pendingPlayerAttack == null) {
       _responseContext = const ManualActivationContext();
     }
     return const LocalDuelActionResult(true, 'Priorité passée.');
@@ -461,16 +420,38 @@ final class LocalDuelController {
     );
     if (!declaration.succeeded) return _failure(declaration.failure);
     _responseContext = ManualActivationContext(attack: declaration.declaration);
+    _pendingPlayerAttack = declaration.declaration;
     state = declaration.state;
     _playAiPriorityOnce();
-    state = _settleWindow(state);
+    _autoPassPlayerWhenNoResponseExists();
+    if (state.chain.isOpen) {
+      return const LocalDuelActionResult(true, 'Attaque déclarée.');
+    }
+    final combat = _resolvePendingPlayerAttack();
+    if (combat == null) {
+      return const LocalDuelActionResult(false, 'Attaque interrompue.');
+    }
+    return LocalDuelActionResult(
+      combat.status == CombatResolutionStatus.resolved,
+      combat.status == CombatResolutionStatus.resolved
+          ? 'Attaque résolue.'
+          : 'Attaque interrompue.',
+    );
+  }
+
+  CombatResolutionResult? _resolvePendingPlayerAttack() {
+    final declaration = _pendingPlayerAttack;
+    if (declaration == null || state.chain.isOpen || state.isFinished) {
+      return null;
+    }
+    _pendingPlayerAttack = null;
     final aiCharactersBefore = {
       for (final card in state.aiField.characterZones.whereType<CardInstance>())
         card.instanceId: card,
     };
     final combat = engine.resolveAttack(
       state: state,
-      declaration: declaration.declaration!,
+      declaration: declaration,
     );
     state = combat.state;
     final destroyedAiCards = combat.destroyedCardInstanceIds
@@ -493,13 +474,28 @@ final class LocalDuelController {
       );
       _playAiPriorityOnce();
     }
-    state = _settleWindow(state);
-    return LocalDuelActionResult(
-      combat.status == CombatResolutionStatus.resolved,
-      combat.status == CombatResolutionStatus.resolved
-          ? 'Attaque résolue.'
-          : 'Attaque interrompue.',
-    );
+    return combat;
+  }
+
+  /// Conserve l'alternance réglementaire sans afficher une fausse décision :
+  /// le joueur passe automatiquement seulement si le moteur ne lui propose
+  /// strictement aucune activation légale. Dès qu'une contre-réponse existe,
+  /// la boucle s'arrête et l'UI garde la fenêtre ouverte.
+  void _autoPassPlayerWhenNoResponseExists() {
+    var guard = 0;
+    while (awaitingPlayerPriority && guard++ < 12) {
+      if (availablePlayerResponses().isNotEmpty) return;
+      final passed = engine.passPriority(
+        state: state,
+        participant: DuelParticipant.player,
+      );
+      if (!passed.succeeded) return;
+      _recordPassResolution(passed);
+      state = passed.state;
+      if (!state.chain.isOpen) return;
+      if (state.chain.priorityPlayer != DuelParticipant.ai) return;
+      _playAiPriorityOnce();
+    }
   }
 
   LocalDuelActionResult advancePlayerPhase() {
@@ -742,21 +738,6 @@ final class LocalDuelController {
       _responseContext = const ManualActivationContext();
     }
     return current;
-  }
-
-  CardInstance? _findPlayerCard(String instanceId) {
-    final field = state.playerField;
-    for (final card in field.hand) {
-      if (card.instanceId == instanceId) return card;
-    }
-    for (final card in field.characterZones) {
-      if (card is CardInstance && card.instanceId == instanceId) return card;
-    }
-    for (final card in field.actionTrapZones) {
-      if (card?.instanceId == instanceId) return card;
-    }
-    if (field.terrainZone?.instanceId == instanceId) return field.terrainZone;
-    return null;
   }
 
   LocalDuelActionResult _failure(DuelActionFailure? failure) {

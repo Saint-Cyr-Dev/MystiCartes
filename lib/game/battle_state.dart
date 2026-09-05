@@ -29,6 +29,57 @@ enum ResponseWindowType {
 
 enum AutomaticEffectTrigger { flippedFaceUp, specialSummoned }
 
+/// Conséquence annoncée par un effet avant sa résolution.
+///
+/// Ces événements sont des données moteur pures. Ils permettent aux joueurs,
+/// aux IA et à l'interface d'ouvrir la bonne fenêtre de réponse sans analyser
+/// le texte, la clé ou le payload privé d'une carte.
+sealed class PendingDuelEvent {
+  const PendingDuelEvent({required this.sourceLinkId});
+
+  final String sourceLinkId;
+}
+
+final class EffectDestructionPending extends PendingDuelEvent {
+  const EffectDestructionPending({
+    required super.sourceLinkId,
+    required this.cardInstanceId,
+  });
+
+  final String cardInstanceId;
+}
+
+final class BanishmentPending extends PendingDuelEvent {
+  const BanishmentPending({
+    required super.sourceLinkId,
+    required this.cardInstanceId,
+    required this.fromGraveyard,
+  });
+
+  final String cardInstanceId;
+  final bool fromGraveyard;
+}
+
+final class LifePointLossPending extends PendingDuelEvent {
+  const LifePointLossPending({
+    required super.sourceLinkId,
+    required this.participant,
+    this.amount,
+  });
+
+  final DuelParticipant participant;
+  final int? amount;
+}
+
+final class FaceDownRevealPending extends PendingDuelEvent {
+  FaceDownRevealPending({
+    required super.sourceLinkId,
+    required Iterable<String> cardInstanceIds,
+  }) : cardInstanceIds = Set.unmodifiable(cardInstanceIds);
+
+  final Set<String> cardInstanceIds;
+}
+
 /// Événement déclenché pendant la résolution d'une Chaîne. Il sera converti
 /// en nouveau maillon seulement après la fermeture de la Chaîne courante.
 final class PendingEffectTrigger {

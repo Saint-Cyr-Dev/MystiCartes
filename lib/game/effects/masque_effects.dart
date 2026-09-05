@@ -62,6 +62,10 @@ typedef _AutomaticTriggerBuilder = ChainLink? Function(
   AutomaticEffectTrigger event,
   String linkId,
 );
+typedef _PendingEventsBuilder = Iterable<PendingDuelEvent> Function(
+  DuelState state,
+  ChainLink link,
+);
 
 final class _FunctionalMasqueEffect extends ChainEffectDefinition {
   const _FunctionalMasqueEffect({
@@ -69,6 +73,7 @@ final class _FunctionalMasqueEffect extends ChainEffectDefinition {
     this.onPayCost,
     this.onTargetLegal,
     this.onAutomaticTrigger,
+    this.onPendingEvents,
     required this.onResolve,
   });
 
@@ -76,6 +81,7 @@ final class _FunctionalMasqueEffect extends ChainEffectDefinition {
   final _StateLinkReducer? onPayCost;
   final _StateLinkPredicate? onTargetLegal;
   final _AutomaticTriggerBuilder? onAutomaticTrigger;
+  final _PendingEventsBuilder? onPendingEvents;
   final _StateLinkReducer onResolve;
 
   @override
@@ -92,6 +98,10 @@ final class _FunctionalMasqueEffect extends ChainEffectDefinition {
   bool canActivate(DuelState state, ChainLink link) {
     return onCanActivate?.call(state, link) ?? true;
   }
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) =>
+      onPendingEvents?.call(state, link) ?? const [];
 
   @override
   DuelState payCost(DuelState state, ChainLink link) {
@@ -340,6 +350,15 @@ final class MasqueEffectRegistry {
       onCanActivate: (state, link) =>
           _sourceHasCode(state, link, 'MAS-008') &&
           link.payload['turn_face_up'] is bool,
+      onPendingEvents: (state, link) =>
+          link.payload['turn_face_up'] == true && link.target != null
+              ? [
+                  FaceDownRevealPending(
+                    sourceLinkId: link.linkId,
+                    cardInstanceIds: [link.target!.cardInstanceId],
+                  ),
+                ]
+              : const [],
       onTargetLegal: (state, link) {
         final target = _findFieldCard(state, link.target?.cardInstanceId);
         return target != null &&
@@ -362,6 +381,12 @@ final class MasqueEffectRegistry {
 
   static ChainEffectDefinition _mas009() {
     return _FunctionalMasqueEffect(
+      onPendingEvents: (state, link) => [
+        FaceDownRevealPending(
+          sourceLinkId: link.linkId,
+          cardInstanceIds: _payloadIds(link, 'reveal_instance_ids'),
+        ),
+      ],
       onCanActivate: (state, link) {
         if (!_sourceHasCode(state, link, 'MAS-009')) return false;
         final ids = _payloadIds(link, 'reveal_instance_ids');
@@ -448,6 +473,17 @@ final class MasqueEffectRegistry {
 
   static ChainEffectDefinition _mas012() {
     return _FunctionalMasqueEffect(
+      onPendingEvents: (state, link) {
+        final id = _targetedChainLink(state, link)?.sourceCardInstanceId;
+        return id == null
+            ? const []
+            : [
+                EffectDestructionPending(
+                  sourceLinkId: link.linkId,
+                  cardInstanceId: id,
+                ),
+              ];
+      },
       onCanActivate: (state, link) {
         final targetLink = _targetedChainLink(state, link);
         if (!_sourceHasCode(state, link, 'MAS-012') ||
@@ -457,6 +493,7 @@ final class MasqueEffectRegistry {
           return false;
         }
         final ids = <String>{
+          ..._payloadIds(link, 'threatened_face_down_instance_ids'),
           if (targetLink.target != null) targetLink.target!.cardInstanceId,
           ..._payloadIds(targetLink, 'reveal_instance_ids'),
         };

@@ -2219,6 +2219,28 @@ class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
                   : Stack(
                       fit: StackFit.expand,
                       children: [
+                        Image.asset(
+                          'assets/images/cards/${widget.presentation.code.toLowerCase()}.png',
+                          key: ValueKey('battle-art-${widget.card.instanceId}'),
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Image.asset(
+                            'assets/images/cards/${widget.presentation.code.toUpperCase()}.png',
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => const Center(
+                              child: Icon(Icons.auto_awesome, color: Colors.white24),
+                            ),
+                          ),
+                        ),
+                        const DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [Colors.black87, Colors.transparent, Colors.black87],
+                              stops: [0, .45, 1],
+                            ),
+                          ),
+                        ),
                         Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [

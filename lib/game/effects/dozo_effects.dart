@@ -52,18 +52,24 @@ final class DefaultDozoAncestralSummonExtension
 
 typedef _Predicate = bool Function(DuelState state, ChainLink link);
 typedef _Reducer = DuelState Function(DuelState state, ChainLink link);
+typedef _PendingEvents = Iterable<PendingDuelEvent> Function(
+  DuelState state,
+  ChainLink link,
+);
 
 final class _FunctionalDozoEffect extends ChainEffectDefinition {
   const _FunctionalDozoEffect({
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
+    this.onPendingEvents,
     required this.onResolve,
   });
 
   final _Predicate? onCanActivate;
   final _Reducer? onPayCost;
   final _Predicate? onTargetLegal;
+  final _PendingEvents? onPendingEvents;
   final _Reducer onResolve;
 
   @override
@@ -77,6 +83,10 @@ final class _FunctionalDozoEffect extends ChainEffectDefinition {
   @override
   bool isTargetLegal(DuelState state, ChainLink link) =>
       onTargetLegal?.call(state, link) ?? link.target == null;
+
+  @override
+  Iterable<PendingDuelEvent> pendingEvents(DuelState state, ChainLink link) =>
+      onPendingEvents?.call(state, link) ?? const [];
 
   @override
   DuelState resolve(DuelState state, ChainLink link) => onResolve(state, link);
@@ -382,6 +392,19 @@ final class DozoEffectRegistry {
 
   static ChainEffectDefinition _doz012() {
     return _FunctionalDozoEffect(
+      onPendingEvents: (state, link) {
+        final targeted = _targetedChainLink(state, link);
+        final id = targeted?.sourceCardInstanceId;
+        return id == null
+            ? const []
+            : [
+                BanishmentPending(
+                  sourceLinkId: link.linkId,
+                  cardInstanceId: id,
+                  fromGraveyard: false,
+                ),
+              ];
+      },
       onCanActivate: (state, link) {
         if (!_sourceHasCode(state, link, 'DOZ-012')) return false;
         final targeted = _targetedChainLink(state, link);
@@ -523,6 +546,15 @@ final class DozoEffectRegistry {
   static ChainEffectDefinition _doz015() {
     const usageKey = '${DozoEffectKeys.doz015}:banish_prey';
     return _FunctionalDozoEffect(
+      onPendingEvents: (state, link) => link.target == null
+          ? const []
+          : [
+              BanishmentPending(
+                sourceLinkId: link.linkId,
+                cardInstanceId: link.target!.cardInstanceId,
+                fromGraveyard: false,
+              ),
+            ],
       onCanActivate: (state, link) {
         final source = _sourceCard(state, link);
         return source?.cardCode == 'DOZ-015' &&
