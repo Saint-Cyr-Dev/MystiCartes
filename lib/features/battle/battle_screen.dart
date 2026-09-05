@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../app/app_routes.dart';
@@ -40,6 +43,15 @@ class _BattleScreenState extends State<BattleScreen> {
   late AiDifficulty _difficulty;
   late DateTime _startedAt;
   BattleReport? _pendingReport;
+  Timer? _bannerTimer;
+  Timer? _hudTimer;
+  Timer? _cardFeedbackTimer;
+  _MomentBannerData? _momentBanner;
+  String? _hudMessage;
+  bool _hudIsError = false;
+  String? _feedbackCardId;
+  String? _feedbackMessage;
+  int _feedbackToken = 0;
 
   @override
   void initState() {
@@ -51,6 +63,17 @@ class _BattleScreenState extends State<BattleScreen> {
       playerDeck: widget.playerDeck,
       playerMythicReserve: widget.playerMythicReserve,
     );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _showTurnBanner(DuelParticipant.player);
+    });
+  }
+
+  @override
+  void dispose() {
+    _bannerTimer?.cancel();
+    _hudTimer?.cancel();
+    _cardFeedbackTimer?.cancel();
+    super.dispose();
   }
 
   void _restart([AiDifficulty? difficulty]) {
@@ -67,6 +90,85 @@ class _BattleScreenState extends State<BattleScreen> {
       _endDialogShown = false;
       _savingResult = false;
       _pendingReport = null;
+      _momentBanner = null;
+      _hudMessage = null;
+      _feedbackCardId = null;
+      _feedbackMessage = null;
+    });
+    _showTurnBanner(DuelParticipant.player);
+  }
+
+  void _showTurnBanner(DuelParticipant participant) {
+    _showMomentBanner(
+      _MomentBannerData(
+        label: participant == DuelParticipant.player
+            ? 'TON TOUR'
+            : "TOUR DE L'ADVERSAIRE",
+        icon: participant == DuelParticipant.player
+            ? Icons.local_fire_department
+            : Icons.psychology,
+        color: participant == DuelParticipant.player
+            ? const Color(0xFF65E8C2)
+            : const Color(0xFFFF6B7A),
+      ),
+    );
+  }
+
+  void _showPhaseBanner(DuelPhase phase) {
+    final visual = _PhaseVisual.of(phase);
+    _showMomentBanner(
+      _MomentBannerData(
+        label: visual.bannerLabel,
+        icon: visual.icon,
+        color: visual.color,
+      ),
+    );
+  }
+
+  void _showMomentBanner(_MomentBannerData data) {
+    _bannerTimer?.cancel();
+    setState(() => _momentBanner = data);
+    _bannerTimer = Timer(const Duration(milliseconds: 1050), () {
+      if (mounted) setState(() => _momentBanner = null);
+    });
+  }
+
+  void _showTransition({
+    required DuelParticipant previousPlayer,
+    required DuelPhase previousPhase,
+  }) {
+    final state = _duel.state;
+    if (state.activePlayer != previousPlayer) {
+      _showTurnBanner(state.activePlayer);
+    } else if (state.currentPhase != previousPhase) {
+      _showPhaseBanner(state.currentPhase);
+    }
+  }
+
+  void _showHudMessage(String message, {bool error = false}) {
+    _hudTimer?.cancel();
+    setState(() {
+      _hudMessage = message;
+      _hudIsError = error;
+    });
+    _hudTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _hudMessage = null);
+    });
+  }
+
+  void _showCardError(String cardInstanceId, String message) {
+    _cardFeedbackTimer?.cancel();
+    setState(() {
+      _feedbackCardId = cardInstanceId;
+      _feedbackMessage = message;
+      _feedbackToken++;
+    });
+    _cardFeedbackTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (!mounted || _feedbackCardId != cardInstanceId) return;
+      setState(() {
+        _feedbackCardId = null;
+        _feedbackMessage = null;
+      });
     });
   }
 
@@ -75,20 +177,24 @@ class _BattleScreenState extends State<BattleScreen> {
     if (_duel.state.activePlayer != DuelParticipant.player ||
         !{DuelPhase.main1, DuelPhase.main2}
             .contains(_duel.state.currentPhase)) {
-      _message('Jouez les cartes pendant une Phase Principale.');
+      _showCardError(
+        card.instanceId,
+        'Attends une Phase Principale',
+      );
       return;
     }
     if (card.category == CardCategory.character) {
       final required = _duel.engine.requiredSacrificesForNormalPlay(card);
       if (required == null) {
-        _message('Ce Personnage ne peut pas être invoqué normalement.');
+        _showCardError(card.instanceId, 'Invocation spéciale requise');
         return;
       }
       if (_selectedSacrifices.length != required) {
-        _message(
+        _showCardError(
+          card.instanceId,
           required == 0
               ? 'Cette carte ne demande aucun sacrifice.'
-              : 'Sélectionnez $required sacrifice${required > 1 ? 's' : ''} sur votre terrain.',
+              : '$required sacrifice${required > 1 ? 's' : ''} requis',
         );
         if (required > 0) return;
       }
@@ -138,7 +244,9 @@ class _BattleScreenState extends State<BattleScreen> {
         _selectedSacrifices.clear();
         _selectedAttackerId = null;
       });
-      _message(result.message);
+      if (!result.succeeded) {
+        _showCardError(card.instanceId, result.message);
+      }
       _checkEnd();
       if (result.succeeded && _duel.awaitingPlayerPriority) {
         await _showChainDecision();
@@ -185,7 +293,9 @@ class _BattleScreenState extends State<BattleScreen> {
       }
       final result = _duel.setActionOrTrap(card.instanceId);
       setState(() {});
-      _message(result.message);
+      if (!result.succeeded) {
+        _showCardError(card.instanceId, result.message);
+      }
       if (result.succeeded && _duel.awaitingPlayerPriority) {
         await _showChainDecision();
       }
@@ -196,13 +306,13 @@ class _BattleScreenState extends State<BattleScreen> {
       await _activateEffectCard(card);
       return;
     }
-    _message('Cette carte ne peut pas être jouée directement depuis la main.');
+    _showCardError(card.instanceId, 'Cette carte ne se joue pas ici');
   }
 
   Future<void> _activateEffectCard(CardInstance card) async {
     final options = _duel.availablePlayerActivations(card.instanceId);
     if (options.isEmpty) {
-      _message('Aucune activation légale pour cette carte actuellement.');
+      _showCardError(card.instanceId, 'Effet indisponible maintenant');
       return;
     }
     LocalChainResponseOption? selected;
@@ -231,7 +341,9 @@ class _BattleScreenState extends State<BattleScreen> {
     );
     if (!mounted) return;
     setState(() {});
-    _message(result.message);
+    if (!result.succeeded) {
+      _showCardError(card.instanceId, result.message);
+    }
     _checkEnd();
     if (result.succeeded && _duel.awaitingPlayerPriority) {
       await _showChainDecision();
@@ -291,7 +403,7 @@ class _BattleScreenState extends State<BattleScreen> {
     }
     if (state.currentPhase == DuelPhase.battle) {
       if (card.position != BattlePosition.attack) {
-        _message('Ce Personnage est en Défense.');
+        _showCardError(card.instanceId, 'Position Défense');
         return;
       }
       final hasTarget =
@@ -300,7 +412,7 @@ class _BattleScreenState extends State<BattleScreen> {
         _resolveAttack(card.instanceId, null);
       } else {
         setState(() => _selectedAttackerId = card.instanceId);
-        _message('Choisissez maintenant une cible adverse.');
+        _showHudMessage('Choisis une cible adverse');
       }
     }
   }
@@ -308,7 +420,7 @@ class _BattleScreenState extends State<BattleScreen> {
   void _tapOpponentCharacter(FieldCardInstance card) {
     final attackerId = _selectedAttackerId;
     if (attackerId == null) {
-      _message('Sélectionnez d’abord votre attaquant.');
+      _showCardError(card.instanceId, 'Choisis d’abord un attaquant');
       return;
     }
     _resolveAttack(attackerId, card.instanceId);
@@ -320,21 +432,29 @@ class _BattleScreenState extends State<BattleScreen> {
       targetInstanceId: targetId,
     );
     setState(() => _selectedAttackerId = null);
-    _message(result.message);
+    if (!result.succeeded) {
+      _showCardError(attackerId, result.message);
+    }
     _checkEnd();
   }
 
   Future<void> _nextPhase() async {
     if (_aiPlaying || _duel.state.isFinished) return;
+    final previousPlayer = _duel.state.activePlayer;
+    final previousPhase = _duel.state.currentPhase;
     final result = _duel.advancePlayerPhase();
     setState(() {
       _selectedSacrifices.clear();
       _selectedAttackerId = null;
     });
     if (!result.succeeded) {
-      _message(result.message);
+      _showHudMessage(result.message, error: true);
       return;
     }
+    _showTransition(
+      previousPlayer: previousPlayer,
+      previousPhase: previousPhase,
+    );
     _checkEnd();
     if (_duel.state.activePlayer == DuelParticipant.ai &&
         !_duel.state.isFinished) {
@@ -350,9 +470,15 @@ class _BattleScreenState extends State<BattleScreen> {
     }
     setState(() => _aiPlaying = true);
     await Future<void>.delayed(const Duration(milliseconds: 450));
+    final previousPlayer = _duel.state.activePlayer;
+    final previousPhase = _duel.state.currentPhase;
     final actions = _duel.playAiUntilPlayerDecision();
     if (!mounted) return;
     setState(() => _aiPlaying = false);
+    _showTransition(
+      previousPlayer: previousPlayer,
+      previousPhase: previousPhase,
+    );
     _checkEnd();
     if (_duel.state.isFinished) return;
 
@@ -363,11 +489,10 @@ class _BattleScreenState extends State<BattleScreen> {
       return;
     }
 
-    if (_duel.state.activePlayer == DuelParticipant.player) {
-      _message(
-        actions.isEmpty
-            ? "L'IA termine son tour."
-            : "Tour IA terminé · ${actions.length} action${actions.length > 1 ? 's' : ''}.",
+    if (_duel.state.activePlayer == DuelParticipant.player &&
+        actions.isNotEmpty) {
+      _showHudMessage(
+        '${actions.length} action${actions.length > 1 ? 's' : ''} adverse${actions.length > 1 ? 's' : ''}',
       );
     }
   }
@@ -405,7 +530,9 @@ class _BattleScreenState extends State<BattleScreen> {
       if (choice == 'pass') {
         final result = _duel.passPlayerPriority();
         setState(() {});
-        if (!result.succeeded) _message(result.message);
+        if (!result.succeeded) {
+          _showHudMessage(result.message, error: true);
+        }
         return;
       }
       if (choice is! int || choice < 0 || choice >= options.length) continue;
@@ -415,7 +542,9 @@ class _BattleScreenState extends State<BattleScreen> {
         option: option,
       );
       setState(() {});
-      _message(result.message);
+      if (!result.succeeded) {
+        _showCardError(option.card.instanceId, result.message);
+      }
       _checkEnd();
       if (!result.succeeded) continue;
     }
@@ -522,13 +651,6 @@ class _BattleScreenState extends State<BattleScreen> {
     });
   }
 
-  void _message(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
-  }
-
   @override
   Widget build(BuildContext context) {
     final state = _duel.state;
@@ -592,18 +714,27 @@ class _BattleScreenState extends State<BattleScreen> {
                         _ZoneRow(
                             zones: state.aiField.actionTrapZones,
                             opponent: true,
-                            controller: _duel),
+                            controller: _duel,
+                            feedbackCardId: _feedbackCardId,
+                            feedbackMessage: _feedbackMessage,
+                            feedbackToken: _feedbackToken),
                         const SizedBox(height: 6),
                         _ZoneRow(
                             zones: state.aiField.characterZones,
                             opponent: true,
                             controller: _duel,
+                            feedbackCardId: _feedbackCardId,
+                            feedbackMessage: _feedbackMessage,
+                            feedbackToken: _feedbackToken,
                             onCardTap: _tapOpponentCharacter),
                         const SizedBox(height: 6),
                         _TerrainSlot(
                           card: state.aiField.terrainZone,
                           controller: _duel,
                           opponent: true,
+                          feedbackCardId: _feedbackCardId,
+                          feedbackMessage: _feedbackMessage,
+                          feedbackToken: _feedbackToken,
                         ),
                         const SizedBox(height: 12),
                         _PhaseBar(
@@ -622,11 +753,17 @@ class _BattleScreenState extends State<BattleScreen> {
                               if (_selectedAttackerId != null)
                                 _selectedAttackerId!
                             },
+                            feedbackCardId: _feedbackCardId,
+                            feedbackMessage: _feedbackMessage,
+                            feedbackToken: _feedbackToken,
                             onCardTap: _tapOwnCharacter),
                         const SizedBox(height: 6),
                         _ZoneRow(
                             zones: state.playerField.actionTrapZones,
                             controller: _duel,
+                            feedbackCardId: _feedbackCardId,
+                            feedbackMessage: _feedbackMessage,
+                            feedbackToken: _feedbackToken,
                             onCardTap: (card) {
                               if (card is CardInstance) {
                                 _activateEffectCard(card);
@@ -636,6 +773,9 @@ class _BattleScreenState extends State<BattleScreen> {
                         _TerrainSlot(
                           card: state.playerField.terrainZone,
                           controller: _duel,
+                          feedbackCardId: _feedbackCardId,
+                          feedbackMessage: _feedbackMessage,
+                          feedbackToken: _feedbackToken,
                           onTap: state.playerField.terrainZone == null
                               ? null
                               : () => _activateEffectCard(
@@ -718,6 +858,11 @@ class _BattleScreenState extends State<BattleScreen> {
                                   card: card,
                                   presentation: _duel.presentationOf(card),
                                   compact: false,
+                                  feedbackMessage:
+                                      _feedbackCardId == card.instanceId
+                                          ? _feedbackMessage
+                                          : null,
+                                  feedbackToken: _feedbackToken,
                                   onTap: () => _playHandCard(card));
                             },
                           ),
@@ -748,6 +893,41 @@ class _BattleScreenState extends State<BattleScreen> {
                 ),
               ),
             ),
+          Positioned(
+            top: 22,
+            left: 24,
+            right: 24,
+            child: IgnorePointer(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                child: _momentBanner == null
+                    ? const SizedBox.shrink()
+                    : _MomentBanner(
+                        key: ValueKey(
+                          '${_momentBanner!.label}-${_momentBanner.hashCode}',
+                        ),
+                        data: _momentBanner!,
+                      ),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 24,
+            right: 24,
+            bottom: 170,
+            child: IgnorePointer(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 180),
+                child: _hudMessage == null
+                    ? const SizedBox.shrink()
+                    : _HudFeedback(
+                        key: ValueKey(_hudMessage),
+                        message: _hudMessage!,
+                        isError: _hudIsError,
+                      ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -778,7 +958,8 @@ class _PlayerStatus extends StatelessWidget {
   final bool isActive;
 
   @override
-  Widget build(BuildContext context) => Container(
+  Widget build(BuildContext context) => AnimatedContainer(
+        duration: const Duration(milliseconds: 260),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
             color: isActive
@@ -786,8 +967,23 @@ class _PlayerStatus extends StatelessWidget {
                 : Colors.black.withValues(alpha: .35),
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
-                color: isActive ? const Color(0xFFE5B8FF) : Colors.white24)),
+                color: isActive ? const Color(0xFFE5B8FF) : Colors.white24),
+            boxShadow: isActive
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFFB66CFF).withValues(alpha: .55),
+                      blurRadius: 18,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : const []),
         child: Row(children: [
+          AnimatedOpacity(
+            duration: const Duration(milliseconds: 220),
+            opacity: isActive ? 1 : .18,
+            child: const Icon(Icons.adjust, size: 16, color: Color(0xFF8BFFD9)),
+          ),
+          const SizedBox(width: 7),
           Expanded(
               child: Text(name,
                   style: const TextStyle(fontWeight: FontWeight.bold))),
@@ -812,33 +1008,213 @@ class _PhaseBar extends StatelessWidget {
   final VoidCallback? onNext;
 
   @override
-  Widget build(BuildContext context) => Card(
-        color: const Color(0xFF0E544B),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          child: Row(children: [
-            Expanded(
-                child: Text(
-                    aiPlaying
-                        ? "L'IA réfléchit…"
-                        : 'Tour $turn · ${_phaseLabel(phase)}',
-                    style: const TextStyle(fontWeight: FontWeight.bold))),
-            FilledButton.icon(
-                onPressed: aiPlaying ? null : onNext,
-                icon: const Icon(Icons.skip_next),
-                label: const Text('Phase suivante'))
-          ]),
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: .28),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withValues(alpha: .08),
+            ),
+            child: Text('$turn',
+                style: const TextStyle(fontWeight: FontWeight.w800)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                for (final candidate in DuelPhase.values)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 3),
+                    child: _PhaseDot(
+                      visual: _PhaseVisual.of(candidate),
+                      active: candidate == phase,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          IconButton.filledTonal(
+            tooltip: 'Phase suivante',
+            onPressed: aiPlaying ? null : onNext,
+            icon: const Icon(Icons.skip_next_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _PhaseVisual {
+  const _PhaseVisual(this.icon, this.color, this.bannerLabel);
+
+  final IconData icon;
+  final Color color;
+  final String bannerLabel;
+
+  static _PhaseVisual of(DuelPhase phase) => switch (phase) {
+        DuelPhase.draw => const _PhaseVisual(
+            Icons.style_rounded, Color(0xFF76C7FF), 'PHASE DE PIOCHE'),
+        DuelPhase.preparation => const _PhaseVisual(Icons.wb_twilight_rounded,
+            Color(0xFFFFC86B), 'PHASE DE PRÉPARATION'),
+        DuelPhase.main1 => const _PhaseVisual(Icons.auto_awesome_rounded,
+            Color(0xFFC990FF), 'PHASE PRINCIPALE 1'),
+        DuelPhase.battle => const _PhaseVisual(
+            Icons.sports_martial_arts_rounded,
+            Color(0xFFFF667A),
+            'PHASE DE COMBAT'),
+        DuelPhase.main2 => const _PhaseVisual(Icons.auto_awesome_motion_rounded,
+            Color(0xFFA88BFF), 'PHASE PRINCIPALE 2'),
+        DuelPhase.end => const _PhaseVisual(
+            Icons.nights_stay_rounded, Color(0xFF7D93B8), 'PHASE DE FIN'),
+      };
+}
+
+class _PhaseDot extends StatelessWidget {
+  const _PhaseDot({required this.visual, required this.active});
+
+  final _PhaseVisual visual;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) => AnimatedContainer(
+        duration: const Duration(milliseconds: 260),
+        width: active ? 35 : 25,
+        height: active ? 35 : 25,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: visual.color.withValues(alpha: active ? .92 : .12),
+          border: Border.all(
+            color: visual.color.withValues(alpha: active ? 1 : .34),
+            width: active ? 2 : 1,
+          ),
+          boxShadow: active
+              ? [
+                  BoxShadow(
+                    color: visual.color.withValues(alpha: .65),
+                    blurRadius: 13,
+                  ),
+                ]
+              : const [],
+        ),
+        child: Icon(
+          visual.icon,
+          size: active ? 19 : 13,
+          color: active ? Colors.white : Colors.white54,
         ),
       );
+}
 
-  static String _phaseLabel(DuelPhase phase) => switch (phase) {
-        DuelPhase.draw => 'Pioche',
-        DuelPhase.preparation => 'Préparation',
-        DuelPhase.main1 => 'Principale 1',
-        DuelPhase.battle => 'Combat',
-        DuelPhase.main2 => 'Principale 2',
-        DuelPhase.end => 'Fin'
-      };
+final class _MomentBannerData {
+  const _MomentBannerData({
+    required this.label,
+    required this.icon,
+    required this.color,
+  });
+
+  final String label;
+  final IconData icon;
+  final Color color;
+}
+
+class _MomentBanner extends StatelessWidget {
+  const _MomentBanner({required this.data, super.key});
+
+  final _MomentBannerData data;
+
+  @override
+  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+        key: const Key('battle-moment-banner'),
+        duration: const Duration(milliseconds: 420),
+        curve: Curves.easeOutBack,
+        tween: Tween(begin: 0, end: 1),
+        builder: (context, value, child) => Opacity(
+          opacity: value.clamp(0, 1),
+          child: Transform.translate(
+            offset: Offset(0, -24 * (1 - value)),
+            child: Transform.scale(scale: .92 + value * .08, child: child),
+          ),
+        ),
+        child: Center(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 440),
+            padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 13),
+            decoration: BoxDecoration(
+              color: const Color(0xEF120D1C),
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(color: data.color, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: data.color.withValues(alpha: .55),
+                  blurRadius: 24,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(data.icon, color: data.color),
+                const SizedBox(width: 12),
+                Flexible(
+                  child: Text(
+                    data.label,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+}
+
+class _HudFeedback extends StatelessWidget {
+  const _HudFeedback({
+    required this.message,
+    required this.isError,
+    super.key,
+  });
+
+  final String message;
+  final bool isError;
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: Container(
+          key: const Key('battle-hud-feedback'),
+          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+          decoration: BoxDecoration(
+            color: (isError ? const Color(0xFF7A1830) : const Color(0xFF171124))
+                .withValues(alpha: .94),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: isError ? const Color(0xFFFF6B7A) : Colors.white24,
+            ),
+          ),
+          child: Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+        ),
+      );
 }
 
 class _TerrainSlot extends StatelessWidget {
@@ -847,12 +1223,18 @@ class _TerrainSlot extends StatelessWidget {
     required this.controller,
     this.opponent = false,
     this.onTap,
+    this.feedbackCardId,
+    this.feedbackMessage,
+    this.feedbackToken = 0,
   });
 
   final CardInstance? card;
   final LocalDuelController controller;
   final bool opponent;
   final VoidCallback? onTap;
+  final String? feedbackCardId;
+  final String? feedbackMessage;
+  final int feedbackToken;
 
   @override
   Widget build(BuildContext context) => Row(
@@ -877,6 +1259,10 @@ class _TerrainSlot extends StatelessWidget {
                     presentation: controller.presentationOf(card!),
                     compact: true,
                     hideIdentity: opponent && !card!.faceUp,
+                    feedbackMessage: feedbackCardId == card!.instanceId
+                        ? feedbackMessage
+                        : null,
+                    feedbackToken: feedbackToken,
                     onTap: onTap,
                   ),
           ),
@@ -890,11 +1276,17 @@ class _ZoneRow extends StatelessWidget {
       required this.controller,
       this.opponent = false,
       this.selectedIds = const {},
+      this.feedbackCardId,
+      this.feedbackMessage,
+      this.feedbackToken = 0,
       this.onCardTap});
   final List<FieldCardInstance?> zones;
   final LocalDuelController controller;
   final bool opponent;
   final Set<String> selectedIds;
+  final String? feedbackCardId;
+  final String? feedbackMessage;
+  final int feedbackToken;
   final ValueChanged<FieldCardInstance>? onCardTap;
 
   @override
@@ -921,6 +1313,11 @@ class _ZoneRow extends StatelessWidget {
                       compact: true,
                       hideIdentity: opponent && !zones[index]!.faceUp,
                       selected: selectedIds.contains(zones[index]!.instanceId),
+                      feedbackMessage:
+                          feedbackCardId == zones[index]!.instanceId
+                              ? feedbackMessage
+                              : null,
+                      feedbackToken: feedbackToken,
                       onTap: onCardTap == null
                           ? null
                           : () => onCardTap!(zones[index]!)),
@@ -930,79 +1327,168 @@ class _ZoneRow extends StatelessWidget {
       );
 }
 
-class _DuelCard extends StatelessWidget {
+class _DuelCard extends StatefulWidget {
   const _DuelCard(
       {required this.card,
       required this.presentation,
       required this.compact,
       this.hideIdentity = false,
       this.selected = false,
+      this.feedbackMessage,
+      this.feedbackToken = 0,
       this.onTap});
   final FieldCardInstance card;
   final LocalCardPresentation presentation;
   final bool compact;
   final bool hideIdentity;
   final bool selected;
+  final String? feedbackMessage;
+  final int feedbackToken;
   final VoidCallback? onTap;
 
   @override
+  State<_DuelCard> createState() => _DuelCardState();
+}
+
+class _DuelCardState extends State<_DuelCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _shakeController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 380),
+  );
+
+  @override
+  void didUpdateWidget(covariant _DuelCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.feedbackMessage != null &&
+        (widget.feedbackToken != oldWidget.feedbackToken ||
+            oldWidget.feedbackMessage == null)) {
+      _shakeController.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _shakeController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final isCharacter = presentation.category == CardCategory.character ||
-        presentation.category == CardCategory.mythic;
-    return SizedBox(
-      width: compact ? 68 : 104,
-      child: Material(
-        color: hideIdentity
-            ? const Color(0xFF3A1C55)
-            : isCharacter
-                ? const Color(0xFF744C2D)
-                : presentation.category == CardCategory.trap
-                    ? const Color(0xFF7A285D)
-                    : const Color(0xFF235C7A),
-        borderRadius: BorderRadius.circular(9),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Container(
-            padding: EdgeInsets.all(compact ? 5 : 8),
-            decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(9),
-                border: Border.all(
-                    color: selected ? const Color(0xFFFFD166) : Colors.white38,
-                    width: selected ? 3 : 1)),
-            child: hideIdentity
-                ? const Center(child: Icon(Icons.auto_awesome, size: 30))
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                        Text(presentation.name,
-                            maxLines: compact ? 2 : 3,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                                fontSize: compact ? 9 : 11,
-                                fontWeight: FontWeight.bold)),
-                        const Spacer(),
-                        if (isCharacter) ...[
-                          Text(
-                              'R${presentation.rank}  ${card.position == BattlePosition.defense ? 'DEF' : 'ATK'}',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(fontSize: compact ? 8 : 10)),
-                          Text('${card.effectiveAtk}/${card.effectiveDef}',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                  fontSize: compact ? 9 : 11,
-                                  fontWeight: FontWeight.w700)),
-                        ] else
-                          Text(
-                              presentation.category == CardCategory.trap
-                                  ? 'PIÈGE'
-                                  : 'ACTION',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(fontSize: compact ? 9 : 11)),
-                        if (!card.faceUp && isCharacter)
-                          const Icon(Icons.visibility_off, size: 13),
-                      ]),
+    final isCharacter =
+        widget.presentation.category == CardCategory.character ||
+            widget.presentation.category == CardCategory.mythic;
+    return AnimatedBuilder(
+      animation: _shakeController,
+      builder: (context, child) {
+        final progress = _shakeController.value;
+        final offset = math.sin(progress * math.pi * 6) * (1 - progress) * 7;
+        return Transform.translate(offset: Offset(offset, 0), child: child);
+      },
+      child: SizedBox(
+        width: widget.compact ? 68 : 104,
+        child: Material(
+          color: widget.hideIdentity
+              ? const Color(0xFF3A1C55)
+              : isCharacter
+                  ? const Color(0xFF744C2D)
+                  : widget.presentation.category == CardCategory.trap
+                      ? const Color(0xFF7A285D)
+                      : const Color(0xFF235C7A),
+          borderRadius: BorderRadius.circular(9),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              padding: EdgeInsets.all(widget.compact ? 5 : 8),
+              decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(
+                      color: widget.feedbackMessage != null
+                          ? const Color(0xFFFF4D67)
+                          : widget.selected
+                              ? const Color(0xFFFFD166)
+                              : Colors.white38,
+                      width: widget.feedbackMessage != null || widget.selected
+                          ? 3
+                          : 1),
+                  boxShadow: widget.feedbackMessage == null
+                      ? const []
+                      : [
+                          BoxShadow(
+                            color:
+                                const Color(0xFFFF294D).withValues(alpha: .8),
+                            blurRadius: 14,
+                          ),
+                        ]),
+              child: widget.hideIdentity
+                  ? const Center(child: Icon(Icons.auto_awesome, size: 30))
+                  : Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Text(widget.presentation.name,
+                                  maxLines: widget.compact ? 2 : 3,
+                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      fontSize: widget.compact ? 9 : 11,
+                                      fontWeight: FontWeight.bold)),
+                              const Spacer(),
+                              if (isCharacter) ...[
+                                Text(
+                                    'R${widget.presentation.rank}  ${widget.card.position == BattlePosition.defense ? 'DEF' : 'ATK'}',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                        fontSize: widget.compact ? 8 : 10)),
+                                Text(
+                                    '${widget.card.effectiveAtk}/${widget.card.effectiveDef}',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                        fontSize: widget.compact ? 9 : 11,
+                                        fontWeight: FontWeight.w700)),
+                              ] else
+                                Text(
+                                    widget.presentation.category ==
+                                            CardCategory.trap
+                                        ? 'PIÈGE'
+                                        : 'ACTION',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                        fontSize: widget.compact ? 9 : 11)),
+                              if (!widget.card.faceUp && isCharacter)
+                                const Icon(Icons.visibility_off, size: 13),
+                            ]),
+                        if (widget.feedbackMessage != null)
+                          Positioned.fill(
+                            child: ColoredBox(
+                              color: const Color(0xFF5C0014)
+                                  .withValues(alpha: .76),
+                              child: Center(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(4),
+                                  child: Text(
+                                    widget.feedbackMessage!,
+                                    key: const Key('battle-card-feedback'),
+                                    textAlign: TextAlign.center,
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: widget.compact ? 8 : 10,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
           ),
         ),
       ),
