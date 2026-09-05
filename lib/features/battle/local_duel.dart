@@ -7,6 +7,7 @@ import '../../game/card.dart';
 import '../../game/duel_engine.dart';
 import '../../game/duel_types.dart';
 import '../../game/effects/effect_registry.dart';
+import '../../game/effects/manual_activation.dart';
 import '../../game/player.dart';
 
 final class LocalCardPresentation {
@@ -96,14 +97,12 @@ final class LocalChainResponseOption {
   const LocalChainResponseOption({
     required this.card,
     required this.label,
-    this.requiresTarget = false,
-    this.requiresDiscard = false,
+    required this.link,
   });
 
   final CardInstance card;
   final String label;
-  final bool requiresTarget;
-  final bool requiresDiscard;
+  final ChainLink link;
 }
 
 /// Adaptateur local entre l'écran Flutter et le moteur Dart pur V2.
@@ -192,6 +191,7 @@ final class LocalDuelController {
   int _aiMainActionsTurn = -1;
   bool _aiMonsterActionDone = false;
   bool _aiBackrowActionDone = false;
+  ManualActivationContext _responseContext = const ManualActivationContext();
   List<String> lastChainEvents = const [];
 
   bool get awaitingPlayerPriority =>
@@ -200,6 +200,11 @@ final class LocalDuelController {
       !state.isFinished;
 
   AttackDeclaration? get pendingAiAttack => _pendingAiAttack;
+
+  ManualActivationContext get _currentResponseContext =>
+      _pendingAiAttack == null
+          ? _responseContext
+          : ManualActivationContext(attack: _pendingAiAttack);
 
   LocalCardPresentation presentationOf(FieldCardInstance card) {
     if (card is CardInstance) return presentations[card.cardCode]!;
@@ -231,7 +236,19 @@ final class LocalDuelController {
             sacrificeInstanceIds: sacrificeInstanceIds,
           );
     if (!result.succeeded) return _failure(result.failure);
-    state = _settleWindow(result.state);
+    final previousIds = state.playerField.characterZones
+        .whereType<CardInstance>()
+        .map((card) => card.instanceId)
+        .toSet();
+    state = result.state;
+    final summoned = state.playerField.characterZones
+        .whereType<CardInstance>()
+        .where((card) => !previousIds.contains(card.instanceId))
+        .firstOrNull;
+    _responseContext = ManualActivationContext(
+      summonedOpponentInstanceId: summoned?.instanceId,
+    );
+    _playAiPriorityOnce();
     return const LocalDuelActionResult(true, 'Personnage joué.');
   }
 
@@ -242,7 +259,9 @@ final class LocalDuelController {
       cardInstanceId: cardInstanceId,
     );
     if (!result.succeeded) return _failure(result.failure);
-    state = _settleWindow(result.state);
+    state = result.state;
+    _responseContext = const ManualActivationContext();
+    _playAiPriorityOnce();
     return const LocalDuelActionResult(true, 'Carte posée face cachée.');
   }
 
@@ -305,46 +324,66 @@ final class LocalDuelController {
 
   List<LocalChainResponseOption> availablePlayerResponses() {
     if (!awaitingPlayerPriority) return const [];
-    final options = <LocalChainResponseOption>[];
-    final backrow = state.playerField.actionTrapZones
-        .whereType<CardInstance>()
-        .where((card) => card.effectKey != null);
-    for (final card in backrow) {
-      switch (card.cardCode) {
-        case 'BAB-008':
-          if (state.playerField.characterZones
-              .whereType<CardInstance>()
-              .any((target) => target.hasFamily('babi'))) {
-            options.add(LocalChainResponseOption(
-              card: card,
-              label: 'Trajet Express — changer une position',
-              requiresTarget: true,
-            ));
-          }
-        case 'BAB-011':
-          if (_pendingAiAttack != null) {
-            options.add(LocalChainResponseOption(
-              card: card,
-              label: 'Feu Rouge Mystique — annuler l’attaque',
-            ));
-          }
-        case 'BAB-012':
-          final lastLink = state.chain.links.lastOrNull;
-          final sourceCategory = lastLink?.sourceCardCode == null
-              ? null
-              : presentations[lastLink!.sourceCardCode!]?.category;
-          if (lastLink != null &&
-              sourceCategory == CardCategory.action &&
-              state.playerField.hand.isNotEmpty) {
-            options.add(LocalChainResponseOption(
-              card: card,
-              label: 'Coupure de Courant — annuler l’Action',
-              requiresDiscard: true,
-            ));
-          }
-      }
+    return ManualActivationPlanner(engine)
+        .legalOptions(
+          state: state,
+          participant: DuelParticipant.player,
+          context: _currentResponseContext,
+        )
+        .map(
+          (option) => LocalChainResponseOption(
+            card: option.source,
+            link: option.link,
+            label:
+                '${presentationOf(option.source).name} — ${option.description}',
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  List<LocalChainResponseOption> availablePlayerActivations(
+    String cardInstanceId,
+  ) {
+    return ManualActivationPlanner(engine)
+        .legalOptions(
+          state: state,
+          participant: DuelParticipant.player,
+          context: _currentResponseContext,
+        )
+        .where((option) => option.source.instanceId == cardInstanceId)
+        .map(
+          (option) => LocalChainResponseOption(
+            card: option.source,
+            link: option.link,
+            label: option.description,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  LocalDuelActionResult activatePreparedOption({
+    required LocalChainResponseOption option,
+    required bool resolveImmediately,
+  }) {
+    final result = engine.activateCard(
+      state: state,
+      participant: DuelParticipant.player,
+      cardInstanceId: option.card.instanceId,
+      link: option.link,
+    );
+    if (!result.succeeded) return _failure(result.failure);
+    lastChainEvents = ['Activation : ${presentationOf(option.card).name}'];
+    state = result.state;
+    _playAiPriorityOnce();
+    if (resolveImmediately && !awaitingPlayerPriority) {
+      state = _settleWindow(state, recordResolution: true);
     }
-    return options;
+    return LocalDuelActionResult(
+      true,
+      resolveImmediately
+          ? 'Effet activé et Chaîne résolue.'
+          : 'Effet ajouté à la Chaîne.',
+    );
   }
 
   LocalDuelActionResult activatePlayerResponse({
@@ -355,36 +394,42 @@ final class LocalDuelController {
     if (!awaitingPlayerPriority) {
       return const LocalDuelActionResult(false, 'Vous n’avez pas la priorité.');
     }
-    final payload = <String, Object?>{};
-    if (option.card.cardCode == 'BAB-011') {
-      final attack = _pendingAiAttack;
-      if (attack == null) {
-        return const LocalDuelActionResult(false, 'Aucune attaque à annuler.');
-      }
-      payload.addAll({
-        'trigger': 'attack_declared',
-        'attack_declaration_id': attack.declarationId,
-        'attacker_instance_id': attack.attackerInstanceId,
-      });
-    } else if (option.card.cardCode == 'BAB-012') {
-      final targetLink = state.chain.links.lastOrNull;
-      if (targetLink == null || discardInstanceId == null) {
-        return const LocalDuelActionResult(
-          false,
-          'Choisissez une carte à défausser.',
-        );
-      }
-      payload.addAll({
-        'target_link_id': targetLink.linkId,
-        'discard_instance_id': discardInstanceId,
-      });
+    return activatePreparedOption(option: option, resolveImmediately: false);
+  }
+
+  void _playAiPriorityOnce() {
+    if (!state.chain.isOpen ||
+        state.chain.priorityPlayer != DuelParticipant.ai ||
+        state.isFinished) {
+      return;
     }
-    return activateEffect(
-      cardInstanceId: option.card.instanceId,
-      targetInstanceId: targetInstanceId,
-      payload: payload,
-      resolveImmediately: false,
+    final options = ManualActivationPlanner(engine).legalOptions(
+      state: state,
+      participant: DuelParticipant.ai,
+      context: _currentResponseContext,
     );
+    final selected = ai.chooseChainActivation(
+      state: state,
+      availableActivations:
+          options.map((option) => option.link).toList(growable: false),
+    );
+    if (selected != null) {
+      final activated = engine.activateCard(
+        state: state,
+        participant: DuelParticipant.ai,
+        cardInstanceId: selected.sourceCardInstanceId!,
+        link: selected,
+      );
+      if (activated.succeeded) {
+        state = activated.state;
+        return;
+      }
+    }
+    final passed = engine.passPriority(
+      state: state,
+      participant: DuelParticipant.ai,
+    );
+    if (passed.succeeded) state = passed.state;
   }
 
   LocalDuelActionResult passPlayerPriority() {
@@ -398,6 +443,9 @@ final class LocalDuelController {
     if (!result.succeeded) return _failure(result.failure);
     _recordPassResolution(result);
     state = result.state;
+    if (!state.chain.isOpen) {
+      _responseContext = const ManualActivationContext();
+    }
     return const LocalDuelActionResult(true, 'Priorité passée.');
   }
 
@@ -412,12 +460,40 @@ final class LocalDuelController {
       targetInstanceId: targetInstanceId,
     );
     if (!declaration.succeeded) return _failure(declaration.failure);
-    state = _settleWindow(declaration.state);
+    _responseContext = ManualActivationContext(attack: declaration.declaration);
+    state = declaration.state;
+    _playAiPriorityOnce();
+    state = _settleWindow(state);
+    final aiCharactersBefore = {
+      for (final card in state.aiField.characterZones.whereType<CardInstance>())
+        card.instanceId: card,
+    };
     final combat = engine.resolveAttack(
       state: state,
       declaration: declaration.declaration!,
     );
-    state = _settleWindow(combat.state);
+    state = combat.state;
+    final destroyedAiCards = combat.destroyedCardInstanceIds
+        .map((id) => aiCharactersBefore[id])
+        .whereType<CardInstance>()
+        .toList(growable: false);
+    if (!state.isFinished &&
+        !state.chain.isOpen &&
+        destroyedAiCards.isNotEmpty) {
+      final destroyed = destroyedAiCards.first;
+      _responseContext = ManualActivationContext(
+        destroyedCharacterRank: destroyed.rank,
+        destroyedWasForest: destroyed.hasFamily('forêt'),
+      );
+      state = state.copyWith(
+        chain: ChainState(
+          window: ResponseWindowType.effectActivation,
+          priorityPlayer: DuelParticipant.ai,
+        ),
+      );
+      _playAiPriorityOnce();
+    }
+    state = _settleWindow(state);
     return LocalDuelActionResult(
       combat.status == CombatResolutionStatus.resolved,
       combat.status == CombatResolutionStatus.resolved
@@ -475,6 +551,29 @@ final class LocalDuelController {
         guard++ < 120) {
       if (state.chain.isOpen) {
         if (state.chain.priorityPlayer == DuelParticipant.player) break;
+        final options = ManualActivationPlanner(engine).legalOptions(
+          state: state,
+          participant: DuelParticipant.ai,
+          context: ManualActivationContext(attack: _pendingAiAttack),
+        );
+        final selected = ai.chooseChainActivation(
+          state: state,
+          availableActivations:
+              options.map((option) => option.link).toList(growable: false),
+        );
+        if (selected != null) {
+          final activated = engine.activateCard(
+            state: state,
+            participant: DuelParticipant.ai,
+            cardInstanceId: selected.sourceCardInstanceId!,
+            link: selected,
+          );
+          if (activated.succeeded) {
+            state = activated.state;
+            actions.add('effet_activé');
+            continue;
+          }
+        }
         final passed = engine.passPriority(
           state: state,
           participant: DuelParticipant.ai,
@@ -486,6 +585,11 @@ final class LocalDuelController {
       }
 
       if (_pendingAiAttack != null) {
+        final playerCharactersBefore = {
+          for (final card
+              in state.playerField.characterZones.whereType<CardInstance>())
+            card.instanceId: card,
+        };
         final combat = engine.resolveAttack(
           state: state,
           declaration: _pendingAiAttack!,
@@ -497,6 +601,25 @@ final class LocalDuelController {
               : 'attaque',
         );
         _pendingAiAttack = null;
+        final destroyedPlayerCards = combat.destroyedCardInstanceIds
+            .map((id) => playerCharactersBefore[id])
+            .whereType<CardInstance>()
+            .toList(growable: false);
+        if (!state.isFinished &&
+            !state.chain.isOpen &&
+            destroyedPlayerCards.isNotEmpty) {
+          final destroyed = destroyedPlayerCards.first;
+          _responseContext = ManualActivationContext(
+            destroyedCharacterRank: destroyed.rank,
+            destroyedWasForest: destroyed.hasFamily('forêt'),
+          );
+          state = state.copyWith(
+            chain: ChainState(
+              window: ResponseWindowType.effectActivation,
+              priorityPlayer: DuelParticipant.player,
+            ),
+          );
+        }
         continue;
       }
 
@@ -516,9 +639,22 @@ final class LocalDuelController {
         }
         if (!_aiMonsterActionDone) {
           _aiMonsterActionDone = true;
+          final previousIds = state.aiField.characterZones
+              .whereType<CardInstance>()
+              .map((card) => card.instanceId)
+              .toSet();
           final monster = ai.playMainMonster(state);
           if (monster != null && monster.succeeded) {
             state = monster.state;
+            final summoned = state.aiField.characterZones
+                .whereType<CardInstance>()
+                .where((card) => !previousIds.contains(card.instanceId))
+                .firstOrNull;
+            if (summoned != null) {
+              _responseContext = ManualActivationContext(
+                summonedOpponentInstanceId: summoned.instanceId,
+              );
+            }
             actions.add('personnage_joué');
             continue;
           }
@@ -601,6 +737,9 @@ final class LocalDuelController {
         ];
       }
       current = result.state;
+    }
+    if (!current.chain.isOpen) {
+      _responseContext = const ManualActivationContext();
     }
     return current;
   }

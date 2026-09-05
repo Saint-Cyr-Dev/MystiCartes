@@ -293,6 +293,14 @@ final class BeginnerAi {
       return card.category == CardCategory.trap ||
           (card.category == CardCategory.action && card.subtype == 'quick');
     }
+    for (final card in state.aiField.hand) {
+      if (card.instanceId == sourceId &&
+          card.controller == participant &&
+          card.category == CardCategory.action &&
+          card.subtype == 'quick') {
+        return true;
+      }
+    }
     return false;
   }
 

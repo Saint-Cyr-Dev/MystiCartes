@@ -140,6 +140,9 @@ class _BattleScreenState extends State<BattleScreen> {
       });
       _message(result.message);
       _checkEnd();
+      if (result.succeeded && _duel.awaitingPlayerPriority) {
+        await _showChainDecision();
+      }
       return;
     }
 
@@ -183,6 +186,9 @@ class _BattleScreenState extends State<BattleScreen> {
       final result = _duel.setActionOrTrap(card.instanceId);
       setState(() {});
       _message(result.message);
+      if (result.succeeded && _duel.awaitingPlayerPriority) {
+        await _showChainDecision();
+      }
       return;
     }
     if (card.category == CardCategory.terrain ||
@@ -194,95 +200,42 @@ class _BattleScreenState extends State<BattleScreen> {
   }
 
   Future<void> _activateEffectCard(CardInstance card) async {
-    String? targetId;
-    var payload = <String, Object?>{};
-    switch (card.cardCode) {
-      case 'BAB-008':
-        targetId = await _chooseCard(
-          'Choisissez un Personnage Babi',
-          _duel.state.playerField.characterZones
-              .whereType<CardInstance>()
-              .where(
-                (candidate) => candidate.hasFamily('babi'),
-              ),
-        );
-        if (targetId == null) return;
-      case 'BAB-009':
-        targetId = await _chooseCard(
-          'Choisissez une carte adverse posée',
-          _duel.state.aiField.actionTrapZones
-              .whereType<CardInstance>()
-              .where((candidate) => !candidate.faceUp),
-        );
-        if (targetId == null) return;
-      case 'BAB-010':
-        final characters =
-            _duel.state.playerField.characterZones.whereType<CardInstance>();
-        final messenger = characters
-            .where((candidate) => candidate.cardCode == 'BAB-002')
-            .firstOrNull;
-        final champion = characters
-            .where((candidate) => candidate.cardCode == 'BAB-006')
-            .firstOrNull;
-        if (messenger == null || champion == null) {
-          _message('Messagère Wôrô-Wôrô et Champion du Bitume sont requis.');
-          return;
-        }
-        payload = {
-          'material_instance_ids': [
-            messenger.instanceId,
-            champion.instanceId,
-          ],
-        };
-      case 'BAB-013':
-        break;
-      case 'BAB-014':
-        targetId = await _chooseCard(
-          'Équiper quel Personnage Babi ?',
-          _duel.state.playerField.characterZones
-              .whereType<CardInstance>()
-              .where(
-                (candidate) => candidate.hasFamily('babi'),
-              ),
-        );
-        if (targetId == null) return;
-        payload = {'mode': 'equip'};
-      default:
-        break;
+    final options = _duel.availablePlayerActivations(card.instanceId);
+    if (options.isEmpty) {
+      _message('Aucune activation légale pour cette carte actuellement.');
+      return;
     }
-    final result = _duel.activateEffect(
-      cardInstanceId: card.instanceId,
-      targetInstanceId: targetId,
-      payload: payload,
+    LocalChainResponseOption? selected;
+    if (options.length == 1) {
+      selected = options.single;
+    } else {
+      final index = await showDialog<int>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('Choisissez la cible ou le coût'),
+          children: [
+            for (var index = 0; index < options.length; index++)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, index),
+                child: Text(options[index].label),
+              ),
+          ],
+        ),
+      );
+      if (index == null) return;
+      selected = options[index];
+    }
+    final result = _duel.activatePreparedOption(
+      option: selected,
+      resolveImmediately: true,
     );
     if (!mounted) return;
     setState(() {});
     _message(result.message);
     _checkEnd();
-  }
-
-  Future<String?> _chooseCard(
-    String title,
-    Iterable<CardInstance> candidates,
-  ) async {
-    final choices = candidates.toList(growable: false);
-    if (choices.isEmpty) {
-      _message('Aucune cible valide.');
-      return null;
+    if (result.succeeded && _duel.awaitingPlayerPriority) {
+      await _showChainDecision();
     }
-    return showDialog<String>(
-      context: context,
-      builder: (context) => SimpleDialog(
-        title: Text(title),
-        children: [
-          for (final card in choices)
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(context, card.instanceId),
-              child: Text(_duel.presentationOf(card).name),
-            ),
-        ],
-      ),
-    );
   }
 
   void _showCards(String title, List<CardInstance> cards) {
@@ -431,7 +384,7 @@ class _BattleScreenState extends State<BattleScreen> {
           title: const Text('Fenêtre de réponse'),
           content: Text(
             _duel.pendingAiAttack == null
-                ? "L'IA vient d'effectuer une action. Vous avez la priorité."
+                ? 'Une fenêtre de réponse est ouverte. Vous avez la priorité.'
                 : "L'IA déclare une attaque. Activez une réponse ou passez.",
           ),
           actions: [
@@ -458,28 +411,8 @@ class _BattleScreenState extends State<BattleScreen> {
       if (choice is! int || choice < 0 || choice >= options.length) continue;
 
       final option = options[choice];
-      String? targetId;
-      String? discardId;
-      if (option.requiresTarget) {
-        targetId = await _chooseCard(
-          'Choisissez un Personnage Babi',
-          _duel.state.playerField.characterZones
-              .whereType<CardInstance>()
-              .where((card) => card.hasFamily('babi')),
-        );
-        if (targetId == null) continue;
-      }
-      if (option.requiresDiscard) {
-        discardId = await _chooseCard(
-          'Choisissez une carte à défausser',
-          _duel.state.playerField.hand,
-        );
-        if (discardId == null) continue;
-      }
       final result = _duel.activatePlayerResponse(
         option: option,
-        targetInstanceId: targetId,
-        discardInstanceId: discardId,
       );
       setState(() {});
       _message(result.message);

@@ -1158,26 +1158,6 @@ final class DuelEngine {
     var preparedState = state;
 
     if (handIndex >= 0) {
-      if (participant != state.activePlayer) {
-        return ChainActivationResult.failure(
-          state,
-          DuelActionFailure.notActivePlayer,
-        );
-      }
-      if (state.currentPhase != DuelPhase.main1 &&
-          state.currentPhase != DuelPhase.main2) {
-        return ChainActivationResult.failure(
-          state,
-          DuelActionFailure.notMainPhase,
-        );
-      }
-      if (state.chain.isOpen) {
-        return ChainActivationResult.failure(
-          state,
-          DuelActionFailure.chainWindowOpen,
-        );
-      }
-
       final card = field.hand[handIndex];
       if (card.category == CardCategory.mythic ||
           card.category == CardCategory.character) {
@@ -1185,6 +1165,30 @@ final class DuelEngine {
           state,
           DuelActionFailure.cardCannotBeActivated,
         );
+      }
+      final isQuickActionResponse = state.chain.isOpen &&
+          card.category == CardCategory.action &&
+          card.subtype == 'quick';
+      if (!isQuickActionResponse) {
+        if (participant != state.activePlayer) {
+          return ChainActivationResult.failure(
+            state,
+            DuelActionFailure.notActivePlayer,
+          );
+        }
+        if (state.currentPhase != DuelPhase.main1 &&
+            state.currentPhase != DuelPhase.main2) {
+          return ChainActivationResult.failure(
+            state,
+            DuelActionFailure.notMainPhase,
+          );
+        }
+        if (state.chain.isOpen) {
+          return ChainActivationResult.failure(
+            state,
+            DuelActionFailure.chainWindowOpen,
+          );
+        }
       }
       final hand = List<CardInstance>.from(field.hand)..removeAt(handIndex);
 
@@ -2022,7 +2026,13 @@ final class DuelEngine {
         source.subtype != 'continuous';
     final isOneShotTrap =
         source.category == CardCategory.trap && source.subtype != 'continuous';
-    if (!isOneShotAction && !isOneShotTrap) return state;
+    if (!isOneShotAction && !isOneShotTrap) {
+      return _updateCatalogCard(state, sourceId, (card) {
+        final runtimeData = Map<String, Object?>.from(card.runtimeData)
+          ..remove(CardRuntimeKeys.pendingOneShotChainLink);
+        return card.copyWith(runtimeData: runtimeData);
+      });
+    }
     return _sendCatalogCardToOwnerGraveyard(
       _removeCatalogCardFromField(state, sourceId),
       source,

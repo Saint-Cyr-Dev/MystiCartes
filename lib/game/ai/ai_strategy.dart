@@ -28,6 +28,13 @@ abstract interface class DuelAiStrategy {
 
   AttackDeclarationResult? declareAttack(DuelState state);
 
+  /// Choisit une activation déjà préparée par le planificateur générique.
+  /// La mutation réelle reste effectuée une seule fois par le contrôleur.
+  ChainLink? chooseChainActivation({
+    required DuelState state,
+    required List<ChainLink> availableActivations,
+  });
+
   DuelActionResult? discardExcessHand(DuelState state);
 }
 
@@ -89,6 +96,18 @@ final class _BeginnerStrategy implements DuelAiStrategy {
       ai.declareRandomAttack(state);
 
   @override
+  ChainLink? chooseChainActivation({
+    required DuelState state,
+    required List<ChainLink> availableActivations,
+  }) =>
+      ai
+          .handlePriority(
+            state: state,
+            availableActivations: availableActivations,
+          )
+          .activatedLink;
+
+  @override
   DuelActionResult? discardExcessHand(DuelState state) =>
       ai.discardExcessHand(state);
 }
@@ -117,6 +136,18 @@ final class _IntermediateStrategy implements DuelAiStrategy {
   @override
   AttackDeclarationResult? declareAttack(DuelState state) =>
       ai.declareBestAttack(state);
+
+  @override
+  ChainLink? chooseChainActivation({
+    required DuelState state,
+    required List<ChainLink> availableActivations,
+  }) =>
+      ai
+          .handlePriority(
+            state: state,
+            availableActivations: availableActivations,
+          )
+          .activatedLink;
 
   @override
   DuelActionResult? discardExcessHand(DuelState state) =>
@@ -149,6 +180,18 @@ final class _AdvancedStrategy implements DuelAiStrategy {
       ai.declareBestAttack(state);
 
   @override
+  ChainLink? chooseChainActivation({
+    required DuelState state,
+    required List<ChainLink> availableActivations,
+  }) =>
+      ai
+          .handlePriority(
+            state: state,
+            availableActivations: availableActivations,
+          )
+          .activatedLink;
+
+  @override
   DuelActionResult? discardExcessHand(DuelState state) =>
       ai.discardExcessHand(state);
 }
@@ -177,6 +220,18 @@ final class _ExpertStrategy implements DuelAiStrategy {
   @override
   AttackDeclarationResult? declareAttack(DuelState state) =>
       ai.declareNextAttack(state);
+
+  @override
+  ChainLink? chooseChainActivation({
+    required DuelState state,
+    required List<ChainLink> availableActivations,
+  }) =>
+      ai
+          .handlePriority(
+            state: state,
+            availableActivations: availableActivations,
+          )
+          .activatedLink;
 
   @override
   DuelActionResult? discardExcessHand(DuelState state) =>
