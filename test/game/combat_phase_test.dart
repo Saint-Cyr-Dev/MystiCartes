@@ -448,6 +448,55 @@ void main() {
     expect(result.state.endReason, DuelEndReason.lifePointsDepleted);
   });
 
+  test("une attaque annulée consomme l'attaque du Personnage", () {
+    final attacker = combatCard(
+      'attacker',
+      owner: DuelParticipant.player,
+      atk: 2400,
+      def: 1700,
+      position: BattlePosition.attack,
+      zoneIndex: 0,
+    );
+    final state = combatDuel(
+      playerCharacters: [attacker, null, null, null, null],
+      aiCharacters: const [null, null, null, null, null],
+    );
+    final declaration = engine.declareAttack(
+      state: state,
+      participant: DuelParticipant.player,
+      attackerInstanceId: 'attacker',
+    );
+    final firstPass = engine.passPriority(
+      state: declaration.state,
+      participant: DuelParticipant.ai,
+    );
+    final secondPass = engine.passPriority(
+      state: firstPass.state,
+      participant: DuelParticipant.player,
+    );
+    final cancelledState = secondPass.state.copyWith(
+      cancelledAttackDeclarationIds: {declaration.declaration!.declarationId},
+    );
+
+    final result = engine.resolveAttack(
+      state: cancelledState,
+      declaration: declaration.declaration!,
+    );
+
+    expect(result.status, CombatResolutionStatus.cancelled);
+    expect(
+      result.state.playerField.characterZones.first!.attackedThisTurn,
+      isTrue,
+    );
+    final retry = engine.declareAttack(
+      state: result.state,
+      participant: DuelParticipant.player,
+      attackerInstanceId: 'attacker',
+    );
+    expect(retry.succeeded, isFalse);
+    expect(retry.failure, DuelActionFailure.attackerAlreadyAttacked);
+  });
+
   test('une cible disparue interrompt le calcul sans attaque directe', () {
     final attacker = combatCard(
       'attacker',

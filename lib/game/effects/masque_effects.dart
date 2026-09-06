@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -69,6 +70,7 @@ typedef _PendingEventsBuilder = Iterable<PendingDuelEvent> Function(
 
 final class _FunctionalMasqueEffect extends ChainEffectDefinition {
   const _FunctionalMasqueEffect({
+    this.onManualActivations,
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
@@ -83,6 +85,12 @@ final class _FunctionalMasqueEffect extends ChainEffectDefinition {
   final _AutomaticTriggerBuilder? onAutomaticTrigger;
   final _PendingEventsBuilder? onPendingEvents;
   final _StateLinkReducer onResolve;
+
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
 
   @override
   ChainLink? createAutomaticTriggerLink({
@@ -347,6 +355,20 @@ final class MasqueEffectRegistry {
 
   static ChainEffectDefinition _mas008() {
     return _FunctionalMasqueEffect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final option = request.option;
+        for (final target
+            in ownCharacters.where((c) => c.hasFamily('masque'))) {
+          yield option(
+              target: ChainTarget(cardInstanceId: target.instanceId),
+              payload: {'turn_face_up': !target.faceUp},
+              description: target.faceUp
+                  ? 'Retourner ${target.cardCode} face cachée'
+                  : 'Révéler ${target.cardCode}',
+              suffix: target.instanceId);
+        }
+      },
       onCanActivate: (state, link) =>
           _sourceHasCode(state, link, 'MAS-008') &&
           link.payload['turn_face_up'] is bool,
@@ -437,6 +459,44 @@ final class MasqueEffectRegistry {
 
   static ChainEffectDefinition _mas011() {
     return _FunctionalMasqueEffect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final attack = request.attack;
+        final option = request.option;
+        if (attack != null) {
+          final attacked = ownCharacters
+              .where(
+                  (c) => c.instanceId == attack.targetInstanceId && !c.faceUp)
+              .firstOrNull;
+          if (attacked != null) {
+            final alternatives = ownCharacters
+                .where((c) => c.instanceId != attacked.instanceId)
+                .toList();
+            if (alternatives.isEmpty) {
+              yield option(
+                  target: ChainTarget(cardInstanceId: attacked.instanceId),
+                  payload: {
+                    'trigger': 'face_down_character_attacked',
+                    'attack_declaration_id': attack.declarationId,
+                    'new_target_instance_id': null
+                  },
+                  description: 'Activer Faux Mouvement',
+                  suffix: attack.declarationId);
+            }
+            for (final replacement in alternatives) {
+              yield option(
+                  target: ChainTarget(cardInstanceId: attacked.instanceId),
+                  payload: {
+                    'trigger': 'face_down_character_attacked',
+                    'attack_declaration_id': attack.declarationId,
+                    'new_target_instance_id': replacement.instanceId
+                  },
+                  description: 'Rediriger vers ${replacement.cardCode}',
+                  suffix: replacement.instanceId);
+            }
+          }
+        }
+      },
       onCanActivate: (state, link) =>
           _sourceHasCode(state, link, 'MAS-011') &&
           link.payload['trigger'] == 'face_down_character_attacked' &&
@@ -473,6 +533,41 @@ final class MasqueEffectRegistry {
 
   static ChainEffectDefinition _mas012() {
     return _FunctionalMasqueEffect(
+      onManualActivations: (request) sync* {
+        final state = request.state;
+        final participant = request.participant;
+        final effectiveContext = request.context;
+        final last = request.last;
+        final option = request.option;
+        if (last != null && last.activatingPlayer != participant) {
+          final reveal = effectiveContext.firstEvent<FaceDownRevealPending>();
+          final threatenedIds = reveal?.cardInstanceIds.where((id) {
+                final card = request.findCard(state, id);
+                return card != null &&
+                    card.controller == participant &&
+                    !card.faceUp;
+              }).toList(growable: false) ??
+              const <String>[];
+          final legacyIds = <String>{
+            if (last.target != null) last.target!.cardInstanceId,
+            ...(last.payload['reveal_instance_ids'] as List? ?? const [])
+                .whereType<String>(),
+          }.where((id) {
+            final card = request.findCard(state, id);
+            return card != null &&
+                card.controller == participant &&
+                !card.faceUp;
+          }).toList(growable: false);
+          final protectedIds =
+              threatenedIds.isNotEmpty ? threatenedIds : legacyIds;
+          if (protectedIds.isNotEmpty) {
+            yield option(payload: {
+              'target_link_id': last.linkId,
+              'threatened_face_down_instance_ids': protectedIds,
+            }, description: 'Annuler la révélation', suffix: last.linkId);
+          }
+        }
+      },
       onPendingEvents: (state, link) {
         final id = _targetedChainLink(state, link)?.sourceCardInstanceId;
         return id == null

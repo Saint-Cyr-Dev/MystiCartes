@@ -18,6 +18,9 @@ class CollectionCardTile extends StatelessWidget {
     final rarityColor = _rarityColor(card.rarity);
     final colors = Theme.of(context).colorScheme;
     return Card(
+      color: const Color(0xFF11121F),
+      elevation: 8,
+      shadowColor: rarityColor.withValues(alpha: .28),
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
@@ -37,8 +40,15 @@ class CollectionCardTile extends StatelessWidget {
                     child: CardArtwork(card: card),
                   ),
                 ),
-                Padding(
+                Container(
                   padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0xFF171828), Color(0xFF0D0E19)],
+                    ),
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [

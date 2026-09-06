@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -58,6 +59,7 @@ typedef _PendingEvents = Iterable<PendingDuelEvent> Function(
 
 final class _Effect extends ChainEffectDefinition {
   const _Effect({
+    this.onManualActivations,
     this.can,
     this.cost,
     this.legal,
@@ -69,6 +71,12 @@ final class _Effect extends ChainEffectDefinition {
   final _Predicate? legal;
   final _PendingEvents? events;
   final _Reducer resolveEffect;
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
+
   @override
   bool canActivate(DuelState state, ChainLink link) =>
       can?.call(state, link) ?? true;
@@ -295,6 +303,25 @@ final class MaquisEffectRegistry {
       );
 
   static ChainEffectDefinition _maq009() => _Effect(
+        onManualActivations: (request) sync* {
+          final own = request.own;
+          final ownCharacters = request.ownCharacters;
+          final option = request.option;
+          for (final target
+              in ownCharacters.where((c) => c.hasFamily('maquis'))) {
+            for (final summon in own.hand.where((c) =>
+                c.category == CardCategory.character &&
+                c.hasFamily('maquis') &&
+                (c.rank ?? 99) < (target.rank ?? -1))) {
+              yield option(
+                  target: ChainTarget(cardInstanceId: target.instanceId),
+                  payload: {'summon_instance_id': summon.instanceId},
+                  description:
+                      'Renvoyer ${target.cardCode} et invoquer ${summon.cardCode}',
+                  suffix: '${target.instanceId}:${summon.instanceId}');
+            }
+          }
+        },
         can: (state, link) {
           if (!_sourceIs(state, link, 'MAQ-009')) return false;
           final summon = _handCard(state, link.activatingPlayer,
@@ -342,6 +369,24 @@ final class MaquisEffectRegistry {
       );
 
   static ChainEffectDefinition _maq011() => _Effect(
+        onManualActivations: (request) sync* {
+          final ownCharacters = request.ownCharacters;
+          final attack = request.attack;
+          final option = request.option;
+          if (attack != null) {
+            for (final target
+                in ownCharacters.where((c) => c.hasFamily('maquis'))) {
+              yield option(
+                  target: ChainTarget(cardInstanceId: target.instanceId),
+                  payload: {
+                    'trigger': 'opponent_attack_declared',
+                    'attack_declaration_id': attack.declarationId
+                  },
+                  description: 'Annuler et reprendre ${target.cardCode}',
+                  suffix: target.instanceId);
+            }
+          }
+        },
         can: (state, link) =>
             _sourceIs(state, link, 'MAQ-011') &&
             link.payload['trigger'] == 'opponent_attack_declared' &&
@@ -362,6 +407,30 @@ final class MaquisEffectRegistry {
       );
 
   static ChainEffectDefinition _maq012() => _Effect(
+        onManualActivations: (request) sync* {
+          final participant = request.participant;
+          final effectiveContext = request.context;
+          final own = request.own;
+          final last = request.last;
+          final option = request.option;
+          final lifeLoss = effectiveContext.firstEvent<LifePointLossPending>();
+          if (last != null &&
+              (effectiveContext.opponentEffectWouldLoseLife ||
+                  (lifeLoss != null &&
+                      lifeLoss.participant == participant &&
+                      last.activatingPlayer != participant))) {
+            for (final discard in own.hand) {
+              yield option(
+                  payload: {
+                    'trigger': 'opponent_effect_life_loss',
+                    'target_link_id': last.linkId,
+                    'discard_instance_id': discard.instanceId
+                  },
+                  description: 'Défausser ${discard.cardCode} et contester',
+                  suffix: discard.instanceId);
+            }
+          }
+        },
         can: (state, link) {
           if (!_sourceIs(state, link, 'MAQ-012') ||
               link.payload['trigger'] != 'opponent_effect_life_loss') {

@@ -108,6 +108,7 @@ void main() {
     expect(find.text('Masques en chantier'), findsOneWidget);
     expect(find.text('Actif'), findsOneWidget);
     expect(find.text('À compléter'), findsOneWidget);
+    expect(find.byType(NavigationBar), findsOneWidget);
 
     await tester.tap(find.text('Sélectionner'));
     await tester.pumpAndSettle();

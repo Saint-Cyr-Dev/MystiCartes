@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -60,6 +61,7 @@ typedef _Reducer = DuelState Function(DuelState state, ChainLink link);
 
 final class _FunctionalForetEffect extends ChainEffectDefinition {
   const _FunctionalForetEffect({
+    this.onManualActivations,
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
@@ -70,6 +72,12 @@ final class _FunctionalForetEffect extends ChainEffectDefinition {
   final _Reducer? onPayCost;
   final _Predicate? onTargetLegal;
   final _Reducer onResolve;
+
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
 
   @override
   bool canActivate(DuelState state, ChainLink link) =>
@@ -261,6 +269,10 @@ final class ForetEffectRegistry {
 
   static ChainEffectDefinition _for008(ForetTokenIdGenerator ids) {
     return _FunctionalForetEffect(
+      onManualActivations: (request) sync* {
+        final option = request.option;
+        yield option(description: 'Créer un Jeton Sylve');
+      },
       onCanActivate: (state, link) =>
           _sourceHasCode(state, link, 'FOR-008') &&
           _hasFreeCharacterZone(state, link.activatingPlayer),
@@ -347,6 +359,20 @@ final class ForetEffectRegistry {
 
   static ChainEffectDefinition _for011() {
     return _FunctionalForetEffect(
+      onManualActivations: (request) sync* {
+        final attack = request.attack;
+        final option = request.option;
+        if (attack != null) {
+          yield option(
+              target: ChainTarget(cardInstanceId: attack.attackerInstanceId),
+              payload: {
+                'trigger': 'opponent_attack_declared',
+                'attack_declaration_id': attack.declarationId
+              },
+              description: 'Entraver l’attaquant',
+              suffix: attack.declarationId);
+        }
+      },
       onCanActivate: (state, link) =>
           _sourceHasCode(state, link, 'FOR-011') &&
           link.payload['trigger'] == 'opponent_attack_declared' &&
@@ -383,6 +409,16 @@ final class ForetEffectRegistry {
   static ChainEffectDefinition _for012(ForetTokenIdGenerator ids) {
     const usageKey = '${ForetEffectKeys.for012}:replacement_token';
     return _FunctionalForetEffect(
+      onManualActivations: (request) sync* {
+        final effectiveContext = request.context;
+        final option = request.option;
+        if (effectiveContext.destroyedWasForest) {
+          yield option(payload: {
+            'trigger': 'controlled_forest_destroyed',
+            'destroyed_was_forest': true
+          }, description: 'Créer un Jeton Sylve');
+        }
+      },
       onCanActivate: (state, link) {
         final source = _sourceCard(state, link);
         return source?.cardCode == 'FOR-012' &&

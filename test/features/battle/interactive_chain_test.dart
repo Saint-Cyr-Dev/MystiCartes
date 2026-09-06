@@ -8,6 +8,7 @@ import 'package:mysticartes/game/duel_engine.dart';
 import 'package:mysticartes/game/duel_types.dart';
 import 'package:mysticartes/game/effects/babi_effects.dart';
 import 'package:mysticartes/game/effects/effect_registry.dart';
+import 'package:mysticartes/game/effects/foret_effects.dart';
 import 'package:mysticartes/game/player.dart';
 
 final class _ZeroRandom implements AiRandomSource {
@@ -167,6 +168,96 @@ void main() {
     expect(resolvedAttacker.position, BattlePosition.defense);
     expect(resolvedAttacker.attackedThisTurn, isTrue);
     expect(controller.lastChainEvents.join(' '), contains('Résolu'));
+  });
+
+  test("FOR-011 n'ouvre pas Passer en boucle après avoir annulé l'attaque IA",
+      () {
+    final engine = DuelEngine(chainEffects: V2EffectRegistry.create());
+    final attacker = _card(
+      id: 'ai-buffle',
+      code: 'SAV-003',
+      owner: DuelParticipant.ai,
+      category: CardCategory.character,
+      atk: 2000,
+      def: 1600,
+      position: BattlePosition.attack,
+      zoneIndex: 0,
+    );
+    final trap = _card(
+      id: 'player-liane',
+      code: 'FOR-011',
+      owner: DuelParticipant.player,
+      category: CardCategory.trap,
+      subtype: 'normal',
+      effectKey: ForetEffectKeys.for011,
+      faceUp: false,
+      zoneIndex: 0,
+    );
+    final state = DuelState(
+      turnNumber: 2,
+      activePlayer: DuelParticipant.ai,
+      currentPhase: DuelPhase.battle,
+      playerField: PlayerFieldState.empty(
+        participant: DuelParticipant.player,
+        deck: const [],
+      ).copyWith(actionTrapZones: [trap, null, null, null, null]),
+      aiField: PlayerFieldState.empty(
+        participant: DuelParticipant.ai,
+        deck: const [],
+      ).copyWith(characterZones: [attacker, null, null, null, null]),
+    );
+    final controller = LocalDuelController.forTesting(
+      engine: engine,
+      ai: createDuelAi(
+        difficulty: AiDifficulty.beginner,
+        engine: engine,
+        random: const _ZeroRandom(),
+      ),
+      presentations: const {
+        'SAV-003': LocalCardPresentation(
+          code: 'SAV-003',
+          name: 'Buffle des Plaines Rouges',
+          category: CardCategory.character,
+          family: 'Savane',
+          attribute: 'Terre',
+          rank: 4,
+          atk: 2000,
+          def: 1600,
+        ),
+        'FOR-011': LocalCardPresentation(
+          code: 'FOR-011',
+          name: 'Liane Entravante',
+          category: CardCategory.trap,
+          family: 'Forêt',
+          attribute: 'Nature',
+          subtype: 'normal',
+          effectKey: ForetEffectKeys.for011,
+        ),
+      },
+      state: state,
+    );
+
+    controller.playAiUntilPlayerDecision();
+    expect(controller.awaitingPlayerPriority, isTrue);
+    final option = controller.availablePlayerResponses().single;
+    expect(option.card.cardCode, 'FOR-011');
+    expect(controller.activatePlayerResponse(option: option).succeeded, isTrue);
+    expect(controller.passPlayerPriority().succeeded, isTrue);
+
+    controller.playAiUntilPlayerDecision();
+
+    expect(controller.awaitingPlayerPriority, isFalse);
+    expect(controller.pendingAiAttack, isNull);
+    expect(
+      controller.state.aiField.characterZones.first!.attackedThisTurn,
+      isTrue,
+    );
+    expect(
+      controller.state.playerField.graveyard
+          .whereType<CardInstance>()
+          .map((card) => card.cardCode),
+      contains('FOR-011'),
+    );
   });
 
   test(

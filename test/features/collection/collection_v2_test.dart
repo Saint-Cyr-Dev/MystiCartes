@@ -105,10 +105,78 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('150 cartes sur 150'), findsOneWidget);
-    final grid =
-        tester.widget<GridView>(find.byKey(const ValueKey('collection-grid')));
-    final delegate = grid.childrenDelegate as SliverChildBuilderDelegate;
+    expect(find.byType(NavigationBar), findsOneWidget);
+    final grid = tester
+        .widget<SliverGrid>(find.byKey(const ValueKey('collection-grid')));
+    final delegate = grid.delegate as SliverChildBuilderDelegate;
     expect(delegate.childCount, 150);
+  });
+
+  testWidgets('toute la bibliothèque défile et permet de revenir en haut',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final cards = List.generate(40, (index) => _card(id: 'scroll-$index'));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CollectionScreen(repository: _FakeRepository(cards)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    const scrollViewKey = ValueKey('collection-scroll-view');
+    const scrollTopKey = ValueKey('collection-scroll-to-top');
+    expect(find.byKey(scrollTopKey), findsNothing);
+
+    await tester.drag(
+      find.byKey(scrollViewKey),
+      const Offset(0, -700),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(scrollTopKey), findsOneWidget);
+    await tester.tap(find.byKey(scrollTopKey));
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byKey(scrollViewKey),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(scrollable.position.pixels, closeTo(0, .01));
+    expect(find.byKey(scrollTopKey), findsNothing);
+  });
+
+  testWidgets('les filtres restent entièrement accessibles sur téléphone',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CollectionScreen(
+          repository: _FakeRepository([_card(id: 'mobile')]),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    for (final key in const [
+      ValueKey('category-filter'),
+      ValueKey('rarity-filter'),
+      ValueKey('family-filter'),
+    ]) {
+      expect(find.byKey(key), findsOneWidget);
+      final rect = tester.getRect(find.byKey(key));
+      expect(rect.left, greaterThanOrEqualTo(0));
+      expect(rect.right, lessThanOrEqualTo(390));
+    }
   });
 
   testWidgets('une carte non combattante ne montre aucune statistique ATK/DEF',

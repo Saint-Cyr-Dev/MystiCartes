@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -59,6 +60,7 @@ typedef _PendingEvents = Iterable<PendingDuelEvent> Function(
 
 final class _FunctionalDozoEffect extends ChainEffectDefinition {
   const _FunctionalDozoEffect({
+    this.onManualActivations,
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
@@ -71,6 +73,12 @@ final class _FunctionalDozoEffect extends ChainEffectDefinition {
   final _Predicate? onTargetLegal;
   final _PendingEvents? onPendingEvents;
   final _Reducer onResolve;
+
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
 
   @override
   bool canActivate(DuelState state, ChainLink link) =>
@@ -304,6 +312,17 @@ final class DozoEffectRegistry {
 
   static ChainEffectDefinition _doz009() {
     return _FunctionalDozoEffect(
+      onManualActivations: (request) sync* {
+        final allCharacters = request.allCharacters;
+        final option = request.option;
+        for (final target in allCharacters
+            .where((c) => c.faceUp && (c.counters['proie'] ?? 0) > 0)) {
+          yield option(
+              target: ChainTarget(cardInstanceId: target.instanceId),
+              description: 'Affaiblir ${target.cardCode}',
+              suffix: target.instanceId);
+        }
+      },
       onCanActivate: (state, link) => _sourceHasCode(state, link, 'DOZ-009'),
       onTargetLegal: (state, link) {
         final target = _findFieldCard(state, link.target?.cardInstanceId);
@@ -363,6 +382,20 @@ final class DozoEffectRegistry {
 
   static ChainEffectDefinition _doz011() {
     return _FunctionalDozoEffect(
+      onManualActivations: (request) sync* {
+        final attack = request.attack;
+        final option = request.option;
+        if (attack != null) {
+          yield option(
+              target: ChainTarget(cardInstanceId: attack.attackerInstanceId),
+              payload: {
+                'trigger': 'opponent_attack_declared',
+                'attack_declaration_id': attack.declarationId
+              },
+              description: 'Prendre l’attaquant au collet',
+              suffix: attack.declarationId);
+        }
+      },
       onCanActivate: (state, link) =>
           _sourceHasCode(state, link, 'DOZ-011') &&
           link.payload['trigger'] == 'opponent_attack_declared' &&
@@ -392,6 +425,20 @@ final class DozoEffectRegistry {
 
   static ChainEffectDefinition _doz012() {
     return _FunctionalDozoEffect(
+      onManualActivations: (request) sync* {
+        final state = request.state;
+        final last = request.last;
+        final option = request.option;
+        final activatingCard = request.sourceCard(state, last);
+        if (last != null &&
+            activatingCard != null &&
+            (activatingCard.counters['proie'] ?? 0) > 0) {
+          yield option(
+              payload: {'target_link_id': last.linkId},
+              description: 'Annuler l’effet de la Proie',
+              suffix: last.linkId);
+        }
+      },
       onPendingEvents: (state, link) {
         final targeted = _targetedChainLink(state, link);
         final id = targeted?.sourceCardInstanceId;

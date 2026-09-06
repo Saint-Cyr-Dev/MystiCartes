@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -53,11 +54,22 @@ typedef _Predicate = bool Function(DuelState, ChainLink);
 typedef _Reducer = DuelState Function(DuelState, ChainLink);
 
 final class _Effect extends ChainEffectDefinition {
-  const _Effect({this.can, this.cost, this.legal, required this.resolveEffect});
+  const _Effect(
+      {this.onManualActivations,
+      this.can,
+      this.cost,
+      this.legal,
+      required this.resolveEffect});
   final _Predicate? can;
   final _Reducer? cost;
   final _Predicate? legal;
   final _Reducer resolveEffect;
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
+
   @override
   bool canActivate(DuelState state, ChainLink link) =>
       can?.call(state, link) ?? true;
@@ -288,6 +300,17 @@ final class SavaneEffectRegistry {
       );
 
   static ChainEffectDefinition _sav009() => _Effect(
+        onManualActivations: (request) sync* {
+          final ownCharacters = request.ownCharacters;
+          final option = request.option;
+          for (final target
+              in ownCharacters.where((c) => c.hasFamily('savane'))) {
+            yield option(
+                target: ChainTarget(cardInstanceId: target.instanceId),
+                description: 'Donner 700 ATK à ${target.cardCode}',
+                suffix: target.instanceId);
+          }
+        },
         can: (state, link) =>
             _sourceIs(state, link, 'SAV-009') &&
             state.currentPhase == DuelPhase.battle,
@@ -330,6 +353,17 @@ final class SavaneEffectRegistry {
       );
 
   static ChainEffectDefinition _sav011() => _Effect(
+        onManualActivations: (request) sync* {
+          final attack = request.attack;
+          final option = request.option;
+          if (attack != null) {
+            yield option(
+                target: ChainTarget(cardInstanceId: attack.attackerInstanceId),
+                payload: {'mode': 'attack_declared'},
+                description: 'Aveugler l’attaquant',
+                suffix: attack.declarationId);
+          }
+        },
         can: (state, link) =>
             _sourceIs(state, link, 'SAV-011') &&
             (link.payload['mode'] == 'attack_declared' ||
@@ -356,6 +390,22 @@ final class SavaneEffectRegistry {
   static ChainEffectDefinition _sav012() {
     const usage = '${SavaneEffectKeys.sav012}:redirect';
     return _Effect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final attack = request.attack;
+        final option = request.option;
+        if (attack != null) {
+          for (final target in ownCharacters.where((c) =>
+              c.hasFamily('savane') &&
+              c.instanceId != attack.targetInstanceId)) {
+            yield option(
+                target: ChainTarget(cardInstanceId: target.instanceId),
+                payload: {'attack_declaration_id': attack.declarationId},
+                description: 'Rediriger vers ${target.cardCode}',
+                suffix: target.instanceId);
+          }
+        }
+      },
       can: (state, link) {
         final source = _source(state, link);
         return source?.cardCode == 'SAV-012' &&

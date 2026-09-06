@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -59,6 +60,7 @@ typedef _PendingEvents = Iterable<PendingDuelEvent> Function(
 
 final class _FunctionalLaguneEffect extends ChainEffectDefinition {
   const _FunctionalLaguneEffect({
+    this.onManualActivations,
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
@@ -71,6 +73,12 @@ final class _FunctionalLaguneEffect extends ChainEffectDefinition {
   final _Predicate? onTargetLegal;
   final _PendingEvents? onPendingEvents;
   final _Reducer onResolve;
+
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
 
   @override
   bool canActivate(DuelState state, ChainLink link) =>
@@ -312,6 +320,21 @@ final class LaguneEffectRegistry {
 
   static ChainEffectDefinition _lag008() {
     return _FunctionalLaguneEffect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final enemyCharacters = request.enemyCharacters;
+        final option = request.option;
+        for (final ally in ownCharacters.where((c) => c.hasFamily('lagune'))) {
+          for (final foe in enemyCharacters
+              .where((c) => (c.rank ?? 99) <= (ally.rank ?? -1))) {
+            yield option(
+                target: ChainTarget(cardInstanceId: ally.instanceId),
+                payload: {'opponent_instance_id': foe.instanceId},
+                description: 'Renvoyer ${ally.cardCode} et ${foe.cardCode}',
+                suffix: '${ally.instanceId}:${foe.instanceId}');
+          }
+        }
+      },
       onCanActivate: (state, link) => _sourceHasCode(state, link, 'LAG-008'),
       onTargetLegal: (state, link) {
         final own = _findFieldCard(state, link.target?.cardInstanceId);
@@ -406,6 +429,18 @@ final class LaguneEffectRegistry {
 
   static ChainEffectDefinition _lag011() {
     return _FunctionalLaguneEffect(
+      onManualActivations: (request) sync* {
+        final effectiveContext = request.context;
+        final option = request.option;
+        final summonedId = effectiveContext.summonedOpponentInstanceId;
+        if (summonedId != null) {
+          yield option(
+              target: ChainTarget(cardInstanceId: summonedId),
+              payload: {'trigger': 'opponent_character_summoned'},
+              description: 'Prendre le nouveau Personnage au filet',
+              suffix: summonedId);
+        }
+      },
       onCanActivate: (state, link) =>
           _sourceHasCode(state, link, 'LAG-011') &&
           link.payload['trigger'] == 'opponent_character_summoned',
@@ -433,6 +468,31 @@ final class LaguneEffectRegistry {
 
   static ChainEffectDefinition _lag012() {
     return _FunctionalLaguneEffect(
+      onManualActivations: (request) sync* {
+        final state = request.state;
+        final participant = request.participant;
+        final effectiveContext = request.context;
+        final last = request.last;
+        final option = request.option;
+        final destruction =
+            effectiveContext.firstEvent<EffectDestructionPending>();
+        final target = destruction == null
+            ? request.targetCard(state, last)
+            : request.findCard(state, destruction.cardInstanceId);
+        if (last != null &&
+            target != null &&
+            target.controller == participant &&
+            target.hasFamily('lagune')) {
+          yield option(
+              target: ChainTarget(cardInstanceId: target.instanceId),
+              payload: {
+                'target_link_id': last.linkId,
+                'threatened_instance_id': target.instanceId,
+              },
+              description: 'Sauver ${target.cardCode} par Reflux',
+              suffix: last.linkId);
+        }
+      },
       onCanActivate: (state, link) {
         if (!_sourceHasCode(state, link, 'LAG-012')) return false;
         final protected = _findFieldCard(state, link.target?.cardInstanceId);

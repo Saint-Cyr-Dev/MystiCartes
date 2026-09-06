@@ -105,6 +105,27 @@ final class LocalChainResponseOption {
   final ChainLink link;
 }
 
+enum LocalDuelVisualEventKind { cardPlayed, effectActivated, attackDeclared }
+
+/// Événement de présentation produit par l'adaptateur local.
+///
+/// Il ne fait pas partie du moteur de règles : l'écran peut le consommer pour
+/// animer clairement la carte source sans faire dépendre `lib/game/` de
+/// Flutter.
+final class LocalDuelVisualEvent {
+  const LocalDuelVisualEvent({
+    required this.kind,
+    required this.card,
+    required this.participant,
+    this.targetInstanceId,
+  });
+
+  final LocalDuelVisualEventKind kind;
+  final CardInstance card;
+  final DuelParticipant participant;
+  final String? targetInstanceId;
+}
+
 /// Adaptateur local entre l'écran Flutter et le moteur Dart pur V2.
 ///
 /// Aucun accès réseau n'est effectué pendant le duel. Le petit deck fourni ici
@@ -193,6 +214,7 @@ final class LocalDuelController {
   bool _aiBackrowActionDone = false;
   ManualActivationContext _responseContext = const ManualActivationContext();
   List<String> lastChainEvents = const [];
+  final List<LocalDuelVisualEvent> _visualEvents = [];
 
   bool get awaitingPlayerPriority =>
       state.chain.isOpen &&
@@ -200,6 +222,16 @@ final class LocalDuelController {
       !state.isFinished;
 
   AttackDeclaration? get pendingAiAttack => _pendingAiAttack;
+
+  /// Vide la file des événements visuels déjà produits.
+  ///
+  /// L'état du duel reste la seule source de vérité ; cette file ne transporte
+  /// que les intentions nécessaires aux animations de la couche Flutter.
+  List<LocalDuelVisualEvent> takeVisualEvents() {
+    final events = List<LocalDuelVisualEvent>.of(_visualEvents);
+    _visualEvents.clear();
+    return events;
+  }
 
   /// Attaque du joueur dont le calcul attend la fermeture normale de la
   /// fenêtre de réponse. Elle reste en suspens tant que les deux joueurs
@@ -250,6 +282,9 @@ final class LocalDuelController {
         .whereType<CardInstance>()
         .where((card) => !previousIds.contains(card.instanceId))
         .firstOrNull;
+    if (summoned != null) {
+      _recordVisualCardPlayed(summoned, DuelParticipant.player);
+    }
     _responseContext = ManualActivationContext(
       summonedOpponentInstanceId: summoned?.instanceId,
     );
@@ -258,6 +293,7 @@ final class LocalDuelController {
   }
 
   LocalDuelActionResult setActionOrTrap(String cardInstanceId) {
+    final source = _findCard(state, cardInstanceId);
     final result = engine.setActionOrTrap(
       state: state,
       participant: DuelParticipant.player,
@@ -265,6 +301,9 @@ final class LocalDuelController {
     );
     if (!result.succeeded) return _failure(result.failure);
     state = result.state;
+    if (source is CardInstance) {
+      _recordVisualCardPlayed(source, DuelParticipant.player);
+    }
     _responseContext = const ManualActivationContext();
     _playAiPriorityOnce();
     return const LocalDuelActionResult(true, 'Carte posée face cachée.');
@@ -313,6 +352,11 @@ final class LocalDuelController {
     required LocalChainResponseOption option,
     required bool resolveImmediately,
   }) {
+    final playedFromHand = _isInHand(
+      state,
+      DuelParticipant.player,
+      option.card.instanceId,
+    );
     final result = engine.activateCard(
       state: state,
       participant: DuelParticipant.player,
@@ -320,6 +364,12 @@ final class LocalDuelController {
       link: option.link,
     );
     if (!result.succeeded) return _failure(result.failure);
+    if (playedFromHand &&
+        const {CardCategory.action, CardCategory.trap}
+            .contains(option.card.category)) {
+      _recordVisualCardPlayed(option.card, DuelParticipant.player);
+    }
+    _recordVisualEffect(option.card, DuelParticipant.player);
     lastChainEvents = ['Activation : ${presentationOf(option.card).name}'];
     state = result.state;
     _playAiPriorityOnce();
@@ -369,6 +419,21 @@ final class LocalDuelController {
         link: selected,
       );
       if (activated.succeeded) {
+        final source = options
+            .where(
+              (option) =>
+                  option.source.instanceId == selected.sourceCardInstanceId,
+            )
+            .firstOrNull
+            ?.source;
+        if (source != null) {
+          if (_isInHand(state, DuelParticipant.ai, source.instanceId) &&
+              const {CardCategory.action, CardCategory.trap}
+                  .contains(source.category)) {
+            _recordVisualCardPlayed(source, DuelParticipant.ai);
+          }
+          _recordVisualEffect(source, DuelParticipant.ai);
+        }
         state = activated.state;
         return;
       }
@@ -419,6 +484,17 @@ final class LocalDuelController {
       targetInstanceId: targetInstanceId,
     );
     if (!declaration.succeeded) return _failure(declaration.failure);
+    final attacker = _findCard(state, attackerInstanceId);
+    if (attacker is CardInstance) {
+      _visualEvents.add(
+        LocalDuelVisualEvent(
+          kind: LocalDuelVisualEventKind.attackDeclared,
+          card: attacker,
+          participant: DuelParticipant.player,
+          targetInstanceId: targetInstanceId,
+        ),
+      );
+    }
     _responseContext = ManualActivationContext(attack: declaration.declaration);
     _pendingPlayerAttack = declaration.declaration;
     state = declaration.state;
@@ -565,6 +641,21 @@ final class LocalDuelController {
             link: selected,
           );
           if (activated.succeeded) {
+            final source = options
+                .where(
+                  (option) =>
+                      option.source.instanceId == selected.sourceCardInstanceId,
+                )
+                .firstOrNull
+                ?.source;
+            if (source != null) {
+              if (_isInHand(state, DuelParticipant.ai, source.instanceId) &&
+                  const {CardCategory.action, CardCategory.trap}
+                      .contains(source.category)) {
+                _recordVisualCardPlayed(source, DuelParticipant.ai);
+              }
+              _recordVisualEffect(source, DuelParticipant.ai);
+            }
             state = activated.state;
             actions.add('effet_activé');
             continue;
@@ -647,6 +738,7 @@ final class LocalDuelController {
                 .where((card) => !previousIds.contains(card.instanceId))
                 .firstOrNull;
             if (summoned != null) {
+              _recordVisualCardPlayed(summoned, DuelParticipant.ai);
               _responseContext = ManualActivationContext(
                 summonedOpponentInstanceId: summoned.instanceId,
               );
@@ -657,9 +749,22 @@ final class LocalDuelController {
         }
         if (!_aiBackrowActionDone) {
           _aiBackrowActionDone = true;
+          final previousBackrowIds = state.aiField.actionTrapZones
+              .whereType<CardInstance>()
+              .map((card) => card.instanceId)
+              .toSet();
           final support = ai.setBackrow(state);
           if (support != null && support.succeeded) {
             state = support.state;
+            final setCard = state.aiField.actionTrapZones
+                .whereType<CardInstance>()
+                .where(
+                  (card) => !previousBackrowIds.contains(card.instanceId),
+                )
+                .firstOrNull;
+            if (setCard != null) {
+              _recordVisualCardPlayed(setCard, DuelParticipant.ai);
+            }
             actions.add('carte_posée');
             continue;
           }
@@ -675,6 +780,20 @@ final class LocalDuelController {
         if (attack != null && attack.succeeded) {
           state = attack.state;
           _pendingAiAttack = attack.declaration;
+          final attacker = _findCard(
+            state,
+            attack.declaration?.attackerInstanceId,
+          );
+          if (attacker is CardInstance) {
+            _visualEvents.add(
+              LocalDuelVisualEvent(
+                kind: LocalDuelVisualEventKind.attackDeclared,
+                card: attacker,
+                participant: DuelParticipant.ai,
+                targetInstanceId: attack.declaration?.targetInstanceId,
+              ),
+            );
+          }
           actions.add('attaque_déclarée');
           continue;
         }
@@ -712,6 +831,65 @@ final class LocalDuelController {
       for (final id in result.resolvedLinkIds) 'Résolu : $id',
       for (final id in result.fizzledLinkIds) 'Annulé : $id',
     ];
+  }
+
+  void _recordVisualEffect(
+    CardInstance card,
+    DuelParticipant participant,
+  ) {
+    _visualEvents.add(
+      LocalDuelVisualEvent(
+        kind: LocalDuelVisualEventKind.effectActivated,
+        card: card,
+        participant: participant,
+      ),
+    );
+  }
+
+  void _recordVisualCardPlayed(
+    CardInstance card,
+    DuelParticipant participant,
+  ) {
+    _visualEvents.add(
+      LocalDuelVisualEvent(
+        kind: LocalDuelVisualEventKind.cardPlayed,
+        card: card,
+        participant: participant,
+      ),
+    );
+  }
+
+  bool _isInHand(
+    DuelState source,
+    DuelParticipant participant,
+    String instanceId,
+  ) {
+    final hand = participant == DuelParticipant.player
+        ? source.playerField.hand
+        : source.aiField.hand;
+    return hand.any((card) => card.instanceId == instanceId);
+  }
+
+  FieldCardInstance? _findCard(DuelState source, String? instanceId) {
+    if (instanceId == null) return null;
+    for (final field in [source.playerField, source.aiField]) {
+      for (final card in <FieldCardInstance?>[
+        ...field.characterZones,
+        ...field.actionTrapZones,
+        field.terrainZone,
+      ]) {
+        if (card?.instanceId == instanceId) return card;
+      }
+      for (final card in <CardInstance>[
+        ...field.hand,
+        ...field.graveyard,
+        ...field.banished,
+        ...field.mythicReserve,
+      ]) {
+        if (card.instanceId == instanceId) return card;
+      }
+    }
+    return null;
   }
 
   DuelState _settleWindow(

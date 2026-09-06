@@ -22,5 +22,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/cards/
+    # Combat : portrait/carre/paysage/ultralarge ; chargement : portrait/paysage.
+    # Le dossier embarque toutes les variantes choisies selon le viewport.
     - assets/images/backgrounds/
     - assets/images/ui/

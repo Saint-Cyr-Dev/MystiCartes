@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -69,6 +70,7 @@ typedef _PendingEventsCallback = Iterable<PendingDuelEvent> Function(
 
 final class _FunctionalRoyaumeEffect extends ChainEffectDefinition {
   const _FunctionalRoyaumeEffect({
+    this.onManualActivations,
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
@@ -81,6 +83,12 @@ final class _FunctionalRoyaumeEffect extends ChainEffectDefinition {
   final _StateLinkPredicate? onTargetLegal;
   final _PendingEventsCallback? onPendingEvents;
   final _StateLinkReducer onResolve;
+
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
 
   @override
   bool canActivate(DuelState state, ChainLink link) {
@@ -324,6 +332,35 @@ final class RoyaumeEffectRegistry {
 
   static ChainEffectDefinition _roy009() {
     return _FunctionalRoyaumeEffect(
+      onManualActivations: (request) sync* {
+        final state = request.state;
+        final participant = request.participant;
+        final effectiveContext = request.context;
+        final ownCharacters = request.ownCharacters;
+        final last = request.last;
+        final option = request.option;
+        final destruction =
+            effectiveContext.firstEvent<EffectDestructionPending>();
+        final protected = destruction == null
+            ? request.targetCard(state, last)
+            : request.findCard(state, destruction.cardInstanceId);
+        if (protected != null &&
+            protected.controller == participant &&
+            protected.hasFamily('royaume')) {
+          for (final sacrifice in ownCharacters
+              .where((c) => c.instanceId != protected.instanceId)) {
+            yield option(
+                target: ChainTarget(cardInstanceId: protected.instanceId),
+                payload: {
+                  'trigger': 'destruction_pending',
+                  'sacrifice_instance_id': sacrifice.instanceId
+                },
+                description:
+                    'Sacrifier ${sacrifice.cardCode} pour protéger ${protected.cardCode}',
+                suffix: sacrifice.instanceId);
+          }
+        }
+      },
       onCanActivate: (state, link) {
         if (!_sourceHasCode(state, link, 'ROY-009') ||
             link.payload['trigger'] != 'destruction_pending') {
@@ -386,6 +423,21 @@ final class RoyaumeEffectRegistry {
 
   static ChainEffectDefinition _roy011() {
     return _FunctionalRoyaumeEffect(
+      onManualActivations: (request) sync* {
+        final attack = request.attack;
+        final option = request.option;
+        if (attack != null) {
+          yield option(
+              target: ChainTarget(cardInstanceId: attack.attackerInstanceId),
+              payload: {
+                'trigger': 'attack_declared',
+                'attack_declaration_id': attack.declarationId,
+                'attack_target_instance_id': attack.targetInstanceId
+              },
+              description: 'Affaiblir l’attaquant',
+              suffix: attack.declarationId);
+        }
+      },
       onCanActivate: (state, link) =>
           _sourceHasCode(state, link, 'ROY-011') &&
           link.payload['trigger'] == 'attack_declared' &&
@@ -433,6 +485,22 @@ final class RoyaumeEffectRegistry {
 
   static ChainEffectDefinition _roy012() {
     return _FunctionalRoyaumeEffect(
+      onManualActivations: (request) sync* {
+        final state = request.state;
+        final participant = request.participant;
+        final last = request.last;
+        final option = request.option;
+        final target = request.targetCard(state, last);
+        if (last != null &&
+            target != null &&
+            target.controller == participant &&
+            target.hasFamily('royaume')) {
+          yield option(
+              payload: {'target_link_id': last.linkId},
+              description: 'Annuler l’effet ciblant ${target.cardCode}',
+              suffix: last.linkId);
+        }
+      },
       onPendingEvents: (state, link) {
         final id = _targetedChainLink(state, link)?.sourceCardInstanceId;
         return id == null

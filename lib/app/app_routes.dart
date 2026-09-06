@@ -10,6 +10,7 @@ class AppRoutes {
   static const home = '/home';
   static const collection = '/collection';
   static const decks = '/decks';
+  static const shop = '/shop';
   static const battle = '/battle';
   static const settings = '/settings';
 }

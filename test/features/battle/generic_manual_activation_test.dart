@@ -433,7 +433,61 @@ _Scenario _scenario(String code, DuelEngine engine) {
   );
 }
 
+final class _IndependentManualEffect extends ChainEffectDefinition {
+  const _IndependentManualEffect();
+
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+    ManualActivationRequest request,
+  ) sync* {
+    for (final target in request.ownCharacters) {
+      yield request.option(
+        target: ChainTarget(cardInstanceId: target.instanceId),
+        suffix: target.instanceId,
+      );
+    }
+  }
+
+  @override
+  bool isTargetLegal(DuelState state, ChainLink link) =>
+      link.target?.cardInstanceId == 'legal-target';
+
+  @override
+  DuelState resolve(DuelState state, ChainLink link) => state;
+}
+
 void main() {
+  test('une définition inédite fournit ses options sans catalogue central', () {
+    final source = _card('NEW-999',
+        id: 'new-source',
+        category: CardCategory.action,
+        subtype: 'normal',
+        effectKey: 'independent-effect');
+    final state = DuelState(
+      turnNumber: 3,
+      activePlayer: DuelParticipant.player,
+      currentPhase: DuelPhase.main1,
+      playerField: _field(participant: DuelParticipant.player, hand: [
+        source
+      ], characters: [
+        _card('NEW-A', id: 'legal-target'),
+        _card('NEW-B', id: 'illegal-target'),
+      ]),
+      aiField: _field(participant: DuelParticipant.ai),
+    );
+    final engine = DuelEngine(chainEffects: {
+      'independent-effect': const _IndependentManualEffect(),
+    });
+    final options = ManualActivationPlanner(engine).legalOptions(
+      state: state,
+      participant: DuelParticipant.player,
+    );
+    expect(options, hasLength(1));
+    expect(options.single.source.cardCode, 'NEW-999');
+    expect(options.single.link.target?.cardInstanceId, 'legal-target');
+    expect(state.playerField.hand, contains(source));
+    expect(state.chain.links, isEmpty);
+  });
   final cases = _keys.keys.toList(growable: false);
 
   for (final code in cases) {

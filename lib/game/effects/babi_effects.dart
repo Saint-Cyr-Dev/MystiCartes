@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -65,6 +66,7 @@ typedef _PendingEventsCallback = Iterable<PendingDuelEvent> Function(
 
 final class _FunctionalBabiEffect extends ChainEffectDefinition {
   const _FunctionalBabiEffect({
+    this.onManualActivations,
     required this.onResolve,
     this.onCanActivate,
     this.onTargetLegal,
@@ -79,6 +81,12 @@ final class _FunctionalBabiEffect extends ChainEffectDefinition {
   final _StateCallback? onPayCost;
   final _PrepareCallback? onPrepare;
   final _PendingEventsCallback? onPendingEvents;
+
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
 
   @override
   ChainLink prepareLink(DuelState state, ChainLink link) {
@@ -308,6 +316,16 @@ final class BabiEffectRegistry {
   static ChainEffectDefinition _bab008() {
     const terrainUsageKey = '${BabiEffectKeys.bab013}:quick_protection';
     return _FunctionalBabiEffect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final option = request.option;
+        for (final target in ownCharacters.where((c) => c.hasFamily('babi'))) {
+          yield option(
+              target: ChainTarget(cardInstanceId: target.instanceId),
+              description: 'Changer la position de ${target.cardCode}',
+              suffix: target.instanceId);
+        }
+      },
       onPrepare: (state, link) {
         final terrain = _activeAbidjanMinuit(state, link.activatingPlayer);
         if (terrain != null &&
@@ -365,6 +383,19 @@ final class BabiEffectRegistry {
 
   static ChainEffectDefinition _bab009() {
     return _FunctionalBabiEffect(
+      onManualActivations: (request) sync* {
+        final enemy = request.enemy;
+        final option = request.option;
+        for (final target in enemy.actionTrapZones
+            .whereType<CardInstance>()
+            .where((card) => !card.faceUp)) {
+          yield option(
+            target: ChainTarget(cardInstanceId: target.instanceId),
+            description: 'Renvoyer la carte posée ${target.cardCode}',
+            suffix: target.instanceId,
+          );
+        }
+      },
       onTargetLegal: (state, link) {
         final target = _findCard(state, link.target?.cardInstanceId);
         return target != null &&
@@ -381,6 +412,27 @@ final class BabiEffectRegistry {
     BabiFusionSummonExtension fusionExtension,
   ) {
     return _FunctionalBabiEffect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final option = request.option;
+        final messenger = ownCharacters
+            .where((card) => card.cardCode == 'BAB-002')
+            .firstOrNull;
+        final champion = ownCharacters
+            .where((card) => card.cardCode == 'BAB-006')
+            .firstOrNull;
+        if (messenger != null && champion != null) {
+          yield option(
+            payload: {
+              'material_instance_ids': [
+                messenger.instanceId,
+                champion.instanceId,
+              ],
+            },
+            description: 'Envoyer les deux matériaux Fusion au Cimetière',
+          );
+        }
+      },
       onCanActivate: _hasFusionMaterials,
       onPayCost: (state, link) {
         var nextState = state;
@@ -402,6 +454,17 @@ final class BabiEffectRegistry {
 
   static ChainEffectDefinition _bab011() {
     return _FunctionalBabiEffect(
+      onManualActivations: (request) sync* {
+        final attack = request.attack;
+        final option = request.option;
+        if (attack != null) {
+          yield option(payload: {
+            'trigger': 'attack_declared',
+            'attack_declaration_id': attack.declarationId,
+            'attacker_instance_id': attack.attackerInstanceId
+          }, description: 'Annuler l’attaque', suffix: attack.declarationId);
+        }
+      },
       onCanActivate: (state, link) =>
           link.payload['trigger'] == 'attack_declared' &&
           link.payload['attack_declaration_id'] is String,
@@ -441,9 +504,26 @@ final class BabiEffectRegistry {
 
   static ChainEffectDefinition _bab012() {
     return _FunctionalBabiEffect(
+      onManualActivations: (request) sync* {
+        final state = request.state;
+        final own = request.own;
+        final last = request.last;
+        final option = request.option;
+        if (last != null &&
+            request.sourceCard(state, last)?.category == CardCategory.action) {
+          for (final discard in own.hand) {
+            yield option(
+                payload: {
+                  'target_link_id': last.linkId,
+                  'discard_instance_id': discard.instanceId
+                },
+                description: 'Défausser ${discard.cardCode} et annuler',
+                suffix: discard.instanceId);
+          }
+        }
+      },
       onPendingEvents: (state, link) {
-        final sourceId =
-            _targetedChainLink(state, link)?.sourceCardInstanceId;
+        final sourceId = _targetedChainLink(state, link)?.sourceCardInstanceId;
         return sourceId == null
             ? const []
             : [
@@ -494,6 +574,10 @@ final class BabiEffectRegistry {
 
   static ChainEffectDefinition _bab013() {
     return _FunctionalBabiEffect(
+      onManualActivations: (request) sync* {
+        final option = request.option;
+        yield option(description: 'Activer le Terrain');
+      },
       onCanActivate: (state, link) => _sourceHasCode(state, link, 'BAB-013'),
       onResolve: (state, link) {
         final sourceId = link.sourceCardInstanceId!;
@@ -532,6 +616,18 @@ final class BabiEffectRegistry {
   static ChainEffectDefinition _bab014() {
     const usageKey = '${BabiEffectKeys.bab014}:inspect_top';
     return _FunctionalBabiEffect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final option = request.option;
+        for (final target in ownCharacters.where((c) => c.hasFamily('babi'))) {
+          yield option(
+            target: ChainTarget(cardInstanceId: target.instanceId),
+            payload: const {'mode': 'equip'},
+            description: 'Équiper ${target.cardCode}',
+            suffix: target.instanceId,
+          );
+        }
+      },
       onCanActivate: (state, link) {
         final source = _sourceCard(state, link);
         final mode = link.payload['mode'];

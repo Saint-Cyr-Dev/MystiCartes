@@ -1,18 +1,23 @@
 import 'package:flutter/material.dart';
 
+import '../../app/app_routes.dart';
 import 'battle_deck_repository.dart';
+import 'battle_presentation_scheduler.dart';
 import 'battle_screen.dart';
 import 'progression_repository.dart';
+import 'widgets/battle_loading_view.dart';
 
 class BattleLaunchScreen extends StatefulWidget {
   const BattleLaunchScreen({
     this.progressionRepository,
     this.deckRepository,
+    this.localDemoMode = false,
     super.key,
   });
 
   final ProgressionRepository? progressionRepository;
   final BattleDeckDataSource? deckRepository;
+  final bool localDemoMode;
 
   @override
   State<BattleLaunchScreen> createState() => _BattleLaunchScreenState();
@@ -20,6 +25,8 @@ class BattleLaunchScreen extends StatefulWidget {
 
 class _BattleLaunchScreenState extends State<BattleLaunchScreen> {
   Object? _error;
+  String _status = 'Préparation de ton profil…';
+  final _presentation = BattlePresentationScheduler();
 
   @override
   void initState() {
@@ -28,60 +35,70 @@ class _BattleLaunchScreenState extends State<BattleLaunchScreen> {
   }
 
   Future<void> _prepare() async {
-    setState(() => _error = null);
+    _presentation.cancelAll();
+    setState(() {
+      _error = null;
+      _status = widget.localDemoMode
+          ? 'Ouverture du terrain…'
+          : 'Préparation de ton profil…';
+    });
+    // A short reveal, concurrent with real loading; not fake progress or a
+    // network delay during the duel. Leaving the page cancels this wait.
+    final reveal = _presentation.wait(const Duration(milliseconds: 1000));
     try {
+      if (widget.localDemoMode) {
+        if (!await reveal || !mounted) return;
+        _enter(const BattleScreen.local());
+        return;
+      }
       final setup =
           await (widget.progressionRepository ?? ProgressionRepository())
               .prepareBattle();
+      if (!mounted) return;
+      setState(() => _status = 'Chargement du deck actif…');
       final deck =
           await (widget.deckRepository ?? SupabaseBattleDeckRepository())
               .load(setup.deckId);
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute<void>(
-          builder: (_) => BattleScreen.local(
-            difficulty: setup.difficulty,
-            deckId: deck.deckId,
-            playerDeck: deck.mainDeck,
-            playerMythicReserve: deck.mythicReserve,
-          ),
-        ),
-      );
+      setState(() => _status = 'Ouverture du terrain…');
+      if (!await reveal || !mounted) return;
+      _enter(BattleScreen.local(
+        difficulty: setup.difficulty,
+        deckId: deck.deckId,
+        playerDeck: deck.mainDeck,
+        playerMythicReserve: deck.mythicReserve,
+      ));
     } catch (error) {
       if (mounted) setState(() => _error = error);
     }
   }
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Préparation du duel')),
-        body: Center(
-          child: _error == null
-              ? const Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 16),
-                    Text('Chargement du deck actif…'),
-                  ],
-                )
-              : Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text('Le duel ne peut pas être préparé.'),
-                      const SizedBox(height: 8),
-                      Text('$_error', textAlign: TextAlign.center),
-                      const SizedBox(height: 16),
-                      FilledButton.icon(
-                        onPressed: _prepare,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Réessayer'),
-                      ),
-                    ],
-                  ),
-                ),
+  void _enter(Widget battle) => Navigator.of(context).pushReplacement(
+        PageRouteBuilder<void>(
+          transitionDuration: const Duration(milliseconds: 400),
+          pageBuilder: (context, animation, secondaryAnimation) => battle,
+          transitionsBuilder: (context, animation, secondaryAnimation, child) =>
+              FadeTransition(opacity: animation, child: child),
         ),
+      );
+
+  @override
+  void dispose() {
+    _presentation.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => BattleLoadingView(
+        status: _status,
+        error: _error,
+        onRetry: _prepare,
+        onBack: () {
+          if (Navigator.canPop(context)) {
+            Navigator.pop(context);
+          } else {
+            Navigator.pushReplacementNamed(context, AppRoutes.home);
+          }
+        },
       );
 }

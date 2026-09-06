@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -9,8 +8,12 @@ import '../../game/battle_state.dart';
 import '../../game/card.dart';
 import '../../game/duel_types.dart';
 import 'battle_result_repository.dart';
+import 'battle_presentation_scheduler.dart';
+import 'battle_settings_dialog.dart';
 import 'local_duel.dart';
 import 'reward_screen.dart';
+import 'widgets/battle_backdrop.dart';
+import 'widgets/battle_pausable_animation.dart';
 
 class BattleScreen extends StatefulWidget {
   const BattleScreen.local({
@@ -46,9 +49,12 @@ class _BattleScreenState extends State<BattleScreen> {
   late AiDifficulty _difficulty;
   late DateTime _startedAt;
   BattleReport? _pendingReport;
-  Timer? _bannerTimer;
-  Timer? _hudTimer;
-  Timer? _cardFeedbackTimer;
+  final _presentation = BattlePresentationScheduler();
+  BattleAnimationPace _animationPace = BattleAnimationPace.normal;
+  Duration _activeSpotlightDuration = const Duration(milliseconds: 2000);
+  BattlePresentationTask? _bannerTimer;
+  BattlePresentationTask? _hudTimer;
+  BattlePresentationTask? _cardFeedbackTimer;
   _MomentBannerData? _momentBanner;
   String? _hudMessage;
   bool _hudIsError = false;
@@ -61,7 +67,10 @@ class _BattleScreenState extends State<BattleScreen> {
   final Map<String, int> _cardFloatTokens = {};
   final Set<String> _summoningCardIds = {};
   final List<_BattleOverlayEvent> _overlayEvents = [];
-  final List<Timer> _visualTimers = [];
+  final List<_BattleOverlayEvent> _spotlightQueue = [];
+  _BattleOverlayEvent? _activeSpotlight;
+  final Set<String> _signaledPlayedCardIds = {};
+  final List<BattlePresentationTask> _visualTimers = [];
   String? _attackingCardId;
   int _attackAnimationToken = 0;
   int _visualSerial = 0;
@@ -78,12 +87,15 @@ class _BattleScreenState extends State<BattleScreen> {
           playerMythicReserve: widget.playerMythicReserve,
         );
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _showTurnBanner(DuelParticipant.player);
+      if (!mounted) return;
+      _showTurnBanner(_duel.state.activePlayer);
+      _consumeDuelVisualEvents();
     });
   }
 
   @override
   void dispose() {
+    _presentation.dispose();
     _bannerTimer?.cancel();
     _hudTimer?.cancel();
     _cardFeedbackTimer?.cancel();
@@ -94,7 +106,10 @@ class _BattleScreenState extends State<BattleScreen> {
   }
 
   void _restart([AiDifficulty? difficulty]) {
+    _presentation.cancelAll();
+    _visualTimers.clear();
     setState(() {
+      _aiPlaying = false;
       _difficulty = difficulty ?? _difficulty;
       _startedAt = DateTime.now().toUtc();
       _duel = LocalDuelController.create(
@@ -117,9 +132,47 @@ class _BattleScreenState extends State<BattleScreen> {
       _cardFloatTokens.clear();
       _summoningCardIds.clear();
       _overlayEvents.clear();
+      _spotlightQueue.clear();
+      _activeSpotlight = null;
+      _signaledPlayedCardIds.clear();
       _attackingCardId = null;
     });
     _showTurnBanner(DuelParticipant.player);
+  }
+
+  /// Presentation-only pause: neither pending AI pacing nor visual queues
+  /// advance while the modal is open. No duel rule/state is rewritten.
+  Future<void> _openSettings() async {
+    if (_presentation.isPaused || _savingResult || _duel.state.isFinished) {
+      return;
+    }
+    setState(_presentation.pause);
+    try {
+      final settings = await showDialog<BattleSettingsResult>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => BattleSettingsDialog(pace: _animationPace),
+      );
+      if (!mounted) return;
+      if (settings != null) {
+        setState(() => _animationPace = settings.pace);
+        if (settings.restart) _restart();
+      }
+    } finally {
+      if (mounted) setState(_presentation.resume);
+    }
+  }
+
+  Duration _spotlightDuration(_BattleOverlayEvent event) {
+    final milliseconds = switch (event.kind) {
+      _BattleOverlayKind.cardPlayed => 2000,
+      _BattleOverlayKind.effectActivated => 1800,
+      _BattleOverlayKind.attackSource => 1600,
+      _ => 1200,
+    };
+    return Duration(
+      milliseconds: (milliseconds * _animationPace.durationScale).round(),
+    );
   }
 
   void _showTurnBanner(DuelParticipant participant) {
@@ -152,7 +205,8 @@ class _BattleScreenState extends State<BattleScreen> {
   void _showMomentBanner(_MomentBannerData data) {
     _bannerTimer?.cancel();
     setState(() => _momentBanner = data);
-    _bannerTimer = Timer(const Duration(milliseconds: 1050), () {
+    _bannerTimer =
+        _presentation.schedule(const Duration(milliseconds: 1050), () {
       if (mounted) setState(() => _momentBanner = null);
     });
   }
@@ -175,7 +229,7 @@ class _BattleScreenState extends State<BattleScreen> {
       _hudMessage = message;
       _hudIsError = error;
     });
-    _hudTimer = Timer(const Duration(milliseconds: 1500), () {
+    _hudTimer = _presentation.schedule(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _hudMessage = null);
     });
   }
@@ -187,7 +241,8 @@ class _BattleScreenState extends State<BattleScreen> {
       _feedbackMessage = message;
       _feedbackToken++;
     });
-    _cardFeedbackTimer = Timer(const Duration(milliseconds: 1500), () {
+    _cardFeedbackTimer =
+        _presentation.schedule(const Duration(milliseconds: 1500), () {
       if (!mounted || _feedbackCardId != cardInstanceId) return;
       setState(() {
         _feedbackCardId = null;
@@ -283,6 +338,7 @@ class _BattleScreenState extends State<BattleScreen> {
     if (!result.succeeded) {
       _showCardError(option.card.instanceId, result.message);
     } else {
+      _consumeDuelVisualEvents();
       _visualizeStateDelta(before, _duel.state);
     }
     _checkEnd();
@@ -299,6 +355,7 @@ class _BattleScreenState extends State<BattleScreen> {
       _showHudMessage(result.message, error: true);
       return;
     }
+    _consumeDuelVisualEvents();
     _visualizeStateDelta(before, _duel.state);
     _checkEnd();
     if (!mounted || _duel.state.isFinished) return;
@@ -313,8 +370,8 @@ class _BattleScreenState extends State<BattleScreen> {
       _cardFloatLabels[instanceId] = label;
       _cardFloatTokens[instanceId] = token;
     });
-    late final Timer timer;
-    timer = Timer(const Duration(milliseconds: 1050), () {
+    late final BattlePresentationTask timer;
+    timer = _presentation.schedule(const Duration(milliseconds: 1500), () {
       _visualTimers.remove(timer);
       if (!mounted || _cardFloatTokens[instanceId] != token) return;
       setState(() {
@@ -326,13 +383,89 @@ class _BattleScreenState extends State<BattleScreen> {
   }
 
   void _addOverlayEvent(_BattleOverlayEvent event) {
+    if (event.isCardSpotlight) {
+      _spotlightQueue.add(event);
+      _showNextSpotlight();
+      return;
+    }
     setState(() => _overlayEvents.add(event));
-    late final Timer timer;
-    timer = Timer(const Duration(milliseconds: 900), () {
+    late final BattlePresentationTask timer;
+    timer = _presentation.schedule(const Duration(milliseconds: 1400), () {
       _visualTimers.remove(timer);
       if (mounted) setState(() => _overlayEvents.remove(event));
     });
     _visualTimers.add(timer);
+  }
+
+  void _showNextSpotlight() {
+    if (!mounted || _activeSpotlight != null || _spotlightQueue.isEmpty) {
+      return;
+    }
+    final event = _spotlightQueue.removeAt(0);
+    setState(() {
+      _activeSpotlight = event;
+      _activeSpotlightDuration = _spotlightDuration(event);
+      _overlayEvents.add(event);
+    });
+    late final BattlePresentationTask timer;
+    timer = _presentation.schedule(_activeSpotlightDuration, () {
+      _visualTimers.remove(timer);
+      if (!mounted) return;
+      setState(() {
+        _overlayEvents.remove(event);
+        if (_activeSpotlight == event) _activeSpotlight = null;
+      });
+      _showNextSpotlight();
+      _checkEnd();
+    });
+    _visualTimers.add(timer);
+  }
+
+  void _consumeDuelVisualEvents() {
+    for (final event in _duel.takeVisualEvents()) {
+      final presentation = _duel.presentationOf(event.card);
+      switch (event.kind) {
+        case LocalDuelVisualEventKind.cardPlayed:
+          _signaledPlayedCardIds.add(event.card.instanceId);
+          _addOverlayEvent(
+            _BattleOverlayEvent.cardPlayed(
+              serial: ++_visualSerial,
+              cardInstanceId: event.card.instanceId,
+              cardCode: presentation.code,
+              label: presentation.name,
+              forPlayer: event.participant == DuelParticipant.player,
+              hidden:
+                  event.participant == DuelParticipant.ai && !event.card.faceUp,
+            ),
+          );
+        case LocalDuelVisualEventKind.effectActivated:
+          _addOverlayEvent(
+            _BattleOverlayEvent.effectActivated(
+              serial: ++_visualSerial,
+              cardInstanceId: event.card.instanceId,
+              cardCode: presentation.code,
+              label: presentation.name,
+              forPlayer: event.participant == DuelParticipant.player,
+            ),
+          );
+        case LocalDuelVisualEventKind.attackDeclared:
+          _addOverlayEvent(
+            _BattleOverlayEvent.attackSource(
+              serial: ++_visualSerial,
+              cardInstanceId: event.card.instanceId,
+              cardCode: presentation.code,
+              label: presentation.name,
+              forPlayer: event.participant == DuelParticipant.player,
+            ),
+          );
+          _addOverlayEvent(
+            _BattleOverlayEvent.impact(
+              serial: ++_visualSerial,
+              direct: event.targetInstanceId == null,
+            ),
+          );
+      }
+    }
   }
 
   void _visualizeStateDelta(DuelState before, DuelState after) {
@@ -342,12 +475,27 @@ class _BattleScreenState extends State<BattleScreen> {
       final previous = beforeCards[entry.key];
       final current = entry.value;
       if (previous == null) {
+        final presentation = _duel.presentationOf(current);
+        if (!_signaledPlayedCardIds.remove(current.instanceId)) {
+          _addOverlayEvent(
+            _BattleOverlayEvent.cardPlayed(
+              serial: ++_visualSerial,
+              cardInstanceId: current.instanceId,
+              cardCode: presentation.code,
+              label: presentation.name,
+              forPlayer: current.controller == DuelParticipant.player,
+              hidden:
+                  current.controller == DuelParticipant.ai && !current.faceUp,
+            ),
+          );
+        }
         if (current.category == CardCategory.character ||
             current.category == CardCategory.mythic) {
           final id = current.instanceId;
           setState(() => _summoningCardIds.add(id));
-          late final Timer timer;
-          timer = Timer(const Duration(milliseconds: 650), () {
+          late final BattlePresentationTask timer;
+          timer =
+              _presentation.schedule(const Duration(milliseconds: 1000), () {
             _visualTimers.remove(timer);
             if (mounted) setState(() => _summoningCardIds.remove(id));
           });
@@ -424,6 +572,7 @@ class _BattleScreenState extends State<BattleScreen> {
         ),
       );
     }
+    _signaledPlayedCardIds.clear();
   }
 
   Map<String, CardInstance> _fieldCards(DuelState state) => {
@@ -517,6 +666,7 @@ class _BattleScreenState extends State<BattleScreen> {
       if (!result.succeeded) {
         _showCardError(card.instanceId, result.message);
       } else {
+        _consumeDuelVisualEvents();
         _visualizeStateDelta(before, _duel.state);
       }
       _checkEnd();
@@ -566,6 +716,7 @@ class _BattleScreenState extends State<BattleScreen> {
       if (!result.succeeded) {
         _showCardError(card.instanceId, result.message);
       } else {
+        _consumeDuelVisualEvents();
         _visualizeStateDelta(before, _duel.state);
       }
       return;
@@ -614,6 +765,7 @@ class _BattleScreenState extends State<BattleScreen> {
     if (!result.succeeded) {
       _showCardError(card.instanceId, result.message);
     } else {
+      _consumeDuelVisualEvents();
       _visualizeStateDelta(before, _duel.state);
     }
     _checkEnd();
@@ -708,32 +860,30 @@ class _BattleScreenState extends State<BattleScreen> {
   }
 
   Future<void> _resolveAttack(String attackerId, String? targetId) async {
-    setState(() {
-      _attackingCardId = attackerId;
-      _attackAnimationToken++;
-    });
-    _addOverlayEvent(
-      _BattleOverlayEvent.impact(
-        serial: ++_visualSerial,
-        direct: targetId == null,
-      ),
-    );
-    await Future<void>.delayed(const Duration(milliseconds: 360));
-    if (!mounted) return;
     final before = _duel.state;
     final result = _duel.attack(
       attackerInstanceId: attackerId,
       targetInstanceId: targetId,
     );
+    if (!result.succeeded) {
+      _consumeDuelVisualEvents();
+      _showCardError(attackerId, result.message);
+      return;
+    }
+    _consumeDuelVisualEvents();
+    setState(() {
+      _attackingCardId = attackerId;
+      _attackAnimationToken++;
+    });
+    if (!await _presentation.wait(const Duration(milliseconds: 360)) ||
+        !mounted) {
+      return;
+    }
     setState(() {
       _selectedAttackerId = null;
       _attackingCardId = null;
     });
-    if (!result.succeeded) {
-      _showCardError(attackerId, result.message);
-    } else {
-      _visualizeStateDelta(before, _duel.state);
-    }
+    _visualizeStateDelta(before, _duel.state);
     _checkEnd();
   }
 
@@ -770,23 +920,18 @@ class _BattleScreenState extends State<BattleScreen> {
       return;
     }
     setState(() => _aiPlaying = true);
-    await Future<void>.delayed(const Duration(milliseconds: 450));
+    if (!await _presentation.wait(const Duration(milliseconds: 450)) ||
+        !mounted) {
+      return;
+    }
     final previousState = _duel.state;
-    final previousPendingAttack = _duel.pendingAiAttack;
     final previousPlayer = _duel.state.activePlayer;
     final previousPhase = _duel.state.currentPhase;
     _duel.playAiUntilPlayerDecision();
     if (!mounted) return;
     setState(() => _aiPlaying = false);
+    _consumeDuelVisualEvents();
     _visualizeStateDelta(previousState, _duel.state);
-    if (previousPendingAttack == null && _duel.pendingAiAttack != null) {
-      _addOverlayEvent(
-        _BattleOverlayEvent.impact(
-          serial: ++_visualSerial,
-          direct: _duel.pendingAiAttack!.targetInstanceId == null,
-        ),
-      );
-    }
     _showTransition(
       previousPlayer: previousPlayer,
       previousPhase: previousPhase,
@@ -801,6 +946,9 @@ class _BattleScreenState extends State<BattleScreen> {
 
   void _checkEnd() {
     if (!_duel.state.isFinished || _endDialogShown || !mounted) return;
+    // The engine has already ended the duel. Only result presentation waits,
+    // so the final attack/effect is not cut off by the reward screen.
+    if (_activeSpotlight != null || _spotlightQueue.isNotEmpty) return;
     _endDialogShown = true;
     if (widget.deckId != null) {
       _saveCompletedDuel();
@@ -905,353 +1053,422 @@ class _BattleScreenState extends State<BattleScreen> {
     final state = _duel.state;
     final activatableIds = _activatableCardIds;
     final validTargetIds = _validChainTargetIds;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Duel V2 · ${_difficultyLabel(_difficulty)}'),
-        actions: [
-          if (!widget.isFirstBattle)
-            PopupMenuButton<AiDifficulty>(
-              tooltip: 'Choisir la difficulté',
-              initialValue: _difficulty,
-              onSelected: _restart,
-              itemBuilder: (context) => [
-                for (final difficulty in AiDifficulty.values)
-                  PopupMenuItem(
-                    value: difficulty,
-                    child: Text(_difficultyLabel(difficulty)),
-                  ),
-              ],
-              icon: const Icon(Icons.psychology),
-            ),
-          IconButton(
-            tooltip: 'Recommencer',
-            onPressed: _restart,
-            icon: const Icon(Icons.refresh),
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          DecoratedBox(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Color(0xFF17111F),
-                  Color(0xFF33203C),
-                  Color(0xFF102B28)
-                ],
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const Positioned.fill(child: BattleBackdrop()),
+        Scaffold(
+          backgroundColor: Colors.transparent,
+          appBar: AppBar(
+            backgroundColor: const Color(0xA0080917),
+            surfaceTintColor: Colors.transparent,
+            title: Row(children: [
+              const Icon(Icons.auto_awesome,
+                  size: 20, color: Color(0xFFC45FFF)),
+              const SizedBox(width: 6),
+              const Expanded(
+                child: Text('Duel V2',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.w900)),
+              ),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(_difficultyLabel(_difficulty),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 11, color: Color(0xFFCDA8EB))),
+              ),
+            ]),
+            actions: [
+              if (!widget.isFirstBattle)
+                PopupMenuButton<AiDifficulty>(
+                  tooltip: 'Choisir la difficulté',
+                  enabled: !_savingResult && !state.isFinished,
+                  initialValue: _difficulty,
+                  onSelected: _restart,
+                  itemBuilder: (context) => [
+                    for (final difficulty in AiDifficulty.values)
+                      PopupMenuItem(
+                        value: difficulty,
+                        child: Text(_difficultyLabel(difficulty)),
+                      ),
+                  ],
+                  icon: const Icon(Icons.psychology),
+                ),
+              IconButton(
+                key: const Key('battle-settings'),
+                tooltip: 'Paramètres / Pause',
+                onPressed:
+                    _savingResult || state.isFinished ? null : _openSettings,
+                icon: const Icon(Icons.settings_rounded),
+              ),
+            ],
+            bottom: PreferredSize(
+              preferredSize: const Size.fromHeight(64),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 7),
+                child: _PhaseBar(
+                  phase: state.currentPhase,
+                  turn: state.turnNumber,
+                ),
               ),
             ),
-            child: SafeArea(
-              child: LayoutBuilder(
-                builder: (context, constraints) => SingleChildScrollView(
-                  padding: const EdgeInsets.all(12),
-                  child: ConstrainedBox(
-                    constraints:
-                        BoxConstraints(minHeight: constraints.maxHeight - 24),
-                    child: Column(
-                      children: [
-                        _PlayerStatus(
-                            name:
-                                'IA ${_difficultyLabel(_difficulty).toLowerCase()}',
-                            lifePoints: state.aiLifePoints,
-                            handCount: state.aiField.hand.length,
-                            deckCount: state.aiField.deck.length,
-                            graveyardCount: state.aiField.graveyard.length,
-                            isActive: state.activePlayer == DuelParticipant.ai),
-                        const SizedBox(height: 8),
-                        _ZoneRow(
-                            zones: state.aiField.actionTrapZones,
-                            opponent: true,
-                            controller: _duel,
-                            feedbackCardId: _feedbackCardId,
-                            feedbackMessage: _feedbackMessage,
-                            feedbackToken: _feedbackToken,
-                            floatLabels: _cardFloatLabels,
-                            floatTokens: _cardFloatTokens,
-                            activatableIds: activatableIds,
-                            validTargetIds: validTargetIds,
-                            onCardTap: _tapSupportCard),
-                        const SizedBox(height: 6),
-                        _ZoneRow(
-                            zones: state.aiField.characterZones,
-                            opponent: true,
-                            controller: _duel,
-                            attackingCardId:
-                                _duel.pendingAiAttack?.attackerInstanceId,
-                            attackAnimationToken:
-                                _duel.pendingAiAttack?.declarationId.hashCode ??
-                                    0,
-                            summoningIds: _summoningCardIds,
-                            feedbackCardId: _feedbackCardId,
-                            feedbackMessage: _feedbackMessage,
-                            feedbackToken: _feedbackToken,
-                            floatLabels: _cardFloatLabels,
-                            floatTokens: _cardFloatTokens,
-                            activatableIds: activatableIds,
-                            validTargetIds: validTargetIds,
-                            onCardTap: _tapOpponentCharacter),
-                        const SizedBox(height: 6),
-                        _TerrainSlot(
-                          card: state.aiField.terrainZone,
-                          controller: _duel,
-                          opponent: true,
-                          feedbackCardId: _feedbackCardId,
-                          feedbackMessage: _feedbackMessage,
-                          feedbackToken: _feedbackToken,
-                          floatLabel: state.aiField.terrainZone == null
-                              ? null
-                              : _cardFloatLabels[
-                                  state.aiField.terrainZone!.instanceId],
-                          floatToken: state.aiField.terrainZone == null
-                              ? 0
-                              : _cardFloatTokens[
-                                      state.aiField.terrainZone!.instanceId] ??
-                                  0,
-                          activatable: activatableIds
-                              .contains(state.aiField.terrainZone?.instanceId),
-                          validTarget: validTargetIds
-                              .contains(state.aiField.terrainZone?.instanceId),
-                          onTap: state.aiField.terrainZone == null
-                              ? null
-                              : () =>
-                                  _tapSupportCard(state.aiField.terrainZone!),
-                        ),
-                        const SizedBox(height: 12),
-                        _PhaseBar(
-                            phase: state.currentPhase,
-                            turn: state.turnNumber,
-                            aiPlaying: _aiPlaying,
-                            onNext: state.activePlayer == DuelParticipant.player
-                                ? _nextPhase
-                                : null),
-                        const SizedBox(height: 12),
-                        _ZoneRow(
-                            zones: state.playerField.characterZones,
-                            controller: _duel,
-                            attackingCardId: _attackingCardId,
-                            attackAnimationToken: _attackAnimationToken,
-                            summoningIds: _summoningCardIds,
-                            selectedIds: {
-                              ..._selectedSacrifices,
-                              if (_selectedAttackerId != null)
-                                _selectedAttackerId!
-                            },
-                            feedbackCardId: _feedbackCardId,
-                            feedbackMessage: _feedbackMessage,
-                            feedbackToken: _feedbackToken,
-                            floatLabels: _cardFloatLabels,
-                            floatTokens: _cardFloatTokens,
-                            activatableIds: activatableIds,
-                            validTargetIds: validTargetIds,
-                            onCardTap: _tapOwnCharacter),
-                        const SizedBox(height: 6),
-                        _ZoneRow(
-                            zones: state.playerField.actionTrapZones,
-                            controller: _duel,
-                            selectedIds: {
-                              if (_pendingChainSourceId != null)
-                                _pendingChainSourceId!,
-                            },
-                            feedbackCardId: _feedbackCardId,
-                            feedbackMessage: _feedbackMessage,
-                            feedbackToken: _feedbackToken,
-                            floatLabels: _cardFloatLabels,
-                            floatTokens: _cardFloatTokens,
-                            activatableIds: activatableIds,
-                            validTargetIds: validTargetIds,
-                            onCardTap: _tapSupportCard),
-                        const SizedBox(height: 6),
-                        _TerrainSlot(
-                          card: state.playerField.terrainZone,
-                          controller: _duel,
-                          feedbackCardId: _feedbackCardId,
-                          feedbackMessage: _feedbackMessage,
-                          feedbackToken: _feedbackToken,
-                          floatLabel: state.playerField.terrainZone == null
-                              ? null
-                              : _cardFloatLabels[
-                                  state.playerField.terrainZone!.instanceId],
-                          floatToken: state.playerField.terrainZone == null
-                              ? 0
-                              : _cardFloatTokens[state
-                                      .playerField.terrainZone!.instanceId] ??
-                                  0,
-                          activatable: activatableIds.contains(
-                            state.playerField.terrainZone?.instanceId,
-                          ),
-                          validTarget: validTargetIds.contains(
-                            state.playerField.terrainZone?.instanceId,
-                          ),
-                          onTap: state.playerField.terrainZone == null
-                              ? null
-                              : () => _tapSupportCard(
-                                    state.playerField.terrainZone!,
-                                  ),
-                        ),
-                        const SizedBox(height: 8),
-                        _PlayerStatus(
-                            name: 'Vous',
-                            lifePoints: state.playerLifePoints,
-                            handCount: state.playerField.hand.length,
-                            deckCount: state.playerField.deck.length,
-                            graveyardCount: state.playerField.graveyard.length,
-                            isActive:
-                                state.activePlayer == DuelParticipant.player),
-                        if (_selectedSacrifices.isNotEmpty)
-                          Padding(
-                              padding: const EdgeInsets.only(top: 8),
-                              child: Text(
-                                  '${_selectedSacrifices.length} sacrifice(s) sélectionné(s)',
-                                  style: const TextStyle(
-                                      color: Color(0xFFFFD166)))),
-                        Wrap(
-                          alignment: WrapAlignment.center,
-                          spacing: 8,
-                          children: [
-                            TextButton.icon(
-                              onPressed: () => _showCards(
-                                'Votre Cimetière',
-                                state.playerField.graveyard,
-                              ),
-                              icon: const Icon(Icons.auto_delete),
-                              label: Text(
-                                'Cimetière (${state.playerField.graveyard.length})',
-                              ),
-                            ),
-                            TextButton.icon(
-                              onPressed: () => _showCards(
-                                'Réserve des Mythiques',
-                                state.playerField.mythicReserve,
-                              ),
-                              icon: const Icon(Icons.auto_awesome),
-                              label: Text(
-                                'Réserve (${state.playerField.mythicReserve.length})',
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (_duel.lastChainEvents.isNotEmpty)
-                          _ChainResolutionIndicator(
-                            count: _duel.lastChainEvents.length,
-                          ),
-                        const SizedBox(height: 10),
-                        SizedBox(
-                          height: 146,
-                          child: ListView.separated(
-                            scrollDirection: Axis.horizontal,
-                            itemCount: state.playerField.hand.length,
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(width: 8),
-                            itemBuilder: (context, index) {
-                              final card = state.playerField.hand[index];
-                              return _DuelCard(
-                                  card: card,
-                                  presentation: _duel.presentationOf(card),
-                                  compact: false,
-                                  selected:
-                                      _pendingChainSourceId == card.instanceId,
-                                  feedbackMessage:
-                                      _feedbackCardId == card.instanceId
-                                          ? _feedbackMessage
-                                          : null,
+          ),
+          body: Stack(
+            fit: StackFit.expand,
+            children: [
+              TickerMode(
+                enabled: !_presentation.isPaused,
+                child: SafeArea(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final designWidth = constraints.maxWidth < 600
+                          ? 480.0
+                          : math.min(760.0, constraints.maxWidth - 16);
+                      return Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: FittedBox(
+                          key: const Key('battle-fitted-board'),
+                          fit: BoxFit.contain,
+                          alignment: Alignment.center,
+                          child: SizedBox(
+                            width: designWidth,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _PlayerStatus(
+                                    name:
+                                        'IA ${_difficultyLabel(_difficulty).toLowerCase()}',
+                                    lifePoints: state.aiLifePoints,
+                                    handCount: state.aiField.hand.length,
+                                    deckCount: state.aiField.deck.length,
+                                    graveyardCount:
+                                        state.aiField.graveyard.length,
+                                    isActive: state.activePlayer ==
+                                        DuelParticipant.ai),
+                                const SizedBox(height: 8),
+                                _ZoneRow(
+                                    zones: state.aiField.actionTrapZones,
+                                    opponent: true,
+                                    controller: _duel,
+                                    feedbackCardId: _feedbackCardId,
+                                    feedbackMessage: _feedbackMessage,
+                                    feedbackToken: _feedbackToken,
+                                    floatLabels: _cardFloatLabels,
+                                    floatTokens: _cardFloatTokens,
+                                    activatableIds: activatableIds,
+                                    validTargetIds: validTargetIds,
+                                    onCardTap: _tapSupportCard),
+                                const SizedBox(height: 6),
+                                _ZoneRow(
+                                    zones: state.aiField.characterZones,
+                                    opponent: true,
+                                    controller: _duel,
+                                    attackingCardId: _duel
+                                        .pendingAiAttack?.attackerInstanceId,
+                                    attackAnimationToken: _duel.pendingAiAttack
+                                            ?.declarationId.hashCode ??
+                                        0,
+                                    summoningIds: _summoningCardIds,
+                                    feedbackCardId: _feedbackCardId,
+                                    feedbackMessage: _feedbackMessage,
+                                    feedbackToken: _feedbackToken,
+                                    floatLabels: _cardFloatLabels,
+                                    floatTokens: _cardFloatTokens,
+                                    activatableIds: activatableIds,
+                                    validTargetIds: validTargetIds,
+                                    onCardTap: _tapOpponentCharacter),
+                                const SizedBox(height: 6),
+                                _TerrainSlot(
+                                  card: state.aiField.terrainZone,
+                                  controller: _duel,
+                                  opponent: true,
+                                  feedbackCardId: _feedbackCardId,
+                                  feedbackMessage: _feedbackMessage,
                                   feedbackToken: _feedbackToken,
-                                  floatLabel: _cardFloatLabels[card.instanceId],
-                                  floatToken:
-                                      _cardFloatTokens[card.instanceId] ?? 0,
-                                  activatable:
-                                      activatableIds.contains(card.instanceId),
-                                  validTarget:
-                                      validTargetIds.contains(card.instanceId),
-                                  onTap: () => _playHandCard(card));
-                            },
+                                  floatLabel: state.aiField.terrainZone == null
+                                      ? null
+                                      : _cardFloatLabels[state
+                                          .aiField.terrainZone!.instanceId],
+                                  floatToken: state.aiField.terrainZone == null
+                                      ? 0
+                                      : _cardFloatTokens[state.aiField
+                                              .terrainZone!.instanceId] ??
+                                          0,
+                                  activatable: activatableIds.contains(
+                                      state.aiField.terrainZone?.instanceId),
+                                  validTarget: validTargetIds.contains(
+                                      state.aiField.terrainZone?.instanceId),
+                                  onTap: state.aiField.terrainZone == null
+                                      ? null
+                                      : () => _tapSupportCard(
+                                          state.aiField.terrainZone!),
+                                ),
+                                const SizedBox(height: 10),
+                                _ZoneRow(
+                                    zones: state.playerField.characterZones,
+                                    controller: _duel,
+                                    attackingCardId: _attackingCardId,
+                                    attackAnimationToken: _attackAnimationToken,
+                                    summoningIds: _summoningCardIds,
+                                    selectedIds: {
+                                      ..._selectedSacrifices,
+                                      if (_selectedAttackerId != null)
+                                        _selectedAttackerId!
+                                    },
+                                    feedbackCardId: _feedbackCardId,
+                                    feedbackMessage: _feedbackMessage,
+                                    feedbackToken: _feedbackToken,
+                                    floatLabels: _cardFloatLabels,
+                                    floatTokens: _cardFloatTokens,
+                                    activatableIds: activatableIds,
+                                    validTargetIds: validTargetIds,
+                                    onCardTap: _tapOwnCharacter),
+                                const SizedBox(height: 6),
+                                _ZoneRow(
+                                    zones: state.playerField.actionTrapZones,
+                                    controller: _duel,
+                                    selectedIds: {
+                                      if (_pendingChainSourceId != null)
+                                        _pendingChainSourceId!,
+                                    },
+                                    feedbackCardId: _feedbackCardId,
+                                    feedbackMessage: _feedbackMessage,
+                                    feedbackToken: _feedbackToken,
+                                    floatLabels: _cardFloatLabels,
+                                    floatTokens: _cardFloatTokens,
+                                    activatableIds: activatableIds,
+                                    validTargetIds: validTargetIds,
+                                    onCardTap: _tapSupportCard),
+                                const SizedBox(height: 6),
+                                Row(
+                                  key: const Key('battle-player-action-row'),
+                                  children: [
+                                    Expanded(
+                                      child: _TerrainSlot(
+                                        card: state.playerField.terrainZone,
+                                        controller: _duel,
+                                        feedbackCardId: _feedbackCardId,
+                                        feedbackMessage: _feedbackMessage,
+                                        feedbackToken: _feedbackToken,
+                                        floatLabel:
+                                            state.playerField.terrainZone ==
+                                                    null
+                                                ? null
+                                                : _cardFloatLabels[state
+                                                    .playerField
+                                                    .terrainZone!
+                                                    .instanceId],
+                                        floatToken:
+                                            state.playerField.terrainZone ==
+                                                    null
+                                                ? 0
+                                                : _cardFloatTokens[state
+                                                        .playerField
+                                                        .terrainZone!
+                                                        .instanceId] ??
+                                                    0,
+                                        activatable: activatableIds.contains(
+                                          state.playerField.terrainZone
+                                              ?.instanceId,
+                                        ),
+                                        validTarget: validTargetIds.contains(
+                                          state.playerField.terrainZone
+                                              ?.instanceId,
+                                        ),
+                                        onTap: state.playerField.terrainZone ==
+                                                null
+                                            ? null
+                                            : () => _tapSupportCard(
+                                                  state
+                                                      .playerField.terrainZone!,
+                                                ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _PlayerTurnControl(
+                                      phase: state.currentPhase,
+                                      deckCount: state.playerField.deck.length,
+                                      playerTurn: state.activePlayer ==
+                                          DuelParticipant.player,
+                                      openingDrawSkipped:
+                                          state.turnNumber == 1 &&
+                                              state.activePlayer ==
+                                                  state.startingPlayer,
+                                      aiPlaying: _aiPlaying,
+                                      awaitingPriority:
+                                          _duel.awaitingPlayerPriority,
+                                      hasActivations: activatableIds.isNotEmpty,
+                                      onNextPhase: _nextPhase,
+                                      onPassPriority: _passChainPriority,
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                _PlayerStatus(
+                                    name: 'Vous',
+                                    lifePoints: state.playerLifePoints,
+                                    handCount: state.playerField.hand.length,
+                                    deckCount: state.playerField.deck.length,
+                                    graveyardCount:
+                                        state.playerField.graveyard.length,
+                                    isActive: state.activePlayer ==
+                                        DuelParticipant.player),
+                                if (_selectedSacrifices.isNotEmpty)
+                                  Padding(
+                                      padding: const EdgeInsets.only(top: 8),
+                                      child: Text(
+                                          '${_selectedSacrifices.length} sacrifice(s) sélectionné(s)',
+                                          style: const TextStyle(
+                                              color: Color(0xFFFFD166)))),
+                                Wrap(
+                                  alignment: WrapAlignment.center,
+                                  spacing: 8,
+                                  children: [
+                                    TextButton.icon(
+                                      onPressed: () => _showCards(
+                                        'Votre Cimetière',
+                                        state.playerField.graveyard,
+                                      ),
+                                      icon: const Icon(Icons.auto_delete),
+                                      label: Text(
+                                        'Cimetière (${state.playerField.graveyard.length})',
+                                      ),
+                                    ),
+                                    TextButton.icon(
+                                      onPressed: () => _showCards(
+                                        'Réserve des Mythiques',
+                                        state.playerField.mythicReserve,
+                                      ),
+                                      icon: const Icon(Icons.auto_awesome),
+                                      label: Text(
+                                        'Réserve (${state.playerField.mythicReserve.length})',
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if (_duel.lastChainEvents.isNotEmpty)
+                                  _ChainResolutionIndicator(
+                                    count: _duel.lastChainEvents.length,
+                                  ),
+                                const SizedBox(height: 10),
+                                SizedBox(
+                                  height: 146,
+                                  child: ListView.separated(
+                                    scrollDirection: Axis.horizontal,
+                                    itemCount: state.playerField.hand.length,
+                                    separatorBuilder: (_, __) =>
+                                        const SizedBox(width: 8),
+                                    itemBuilder: (context, index) {
+                                      final card =
+                                          state.playerField.hand[index];
+                                      return _DuelCard(
+                                          card: card,
+                                          presentation:
+                                              _duel.presentationOf(card),
+                                          compact: false,
+                                          selected: _pendingChainSourceId ==
+                                              card.instanceId,
+                                          feedbackMessage:
+                                              _feedbackCardId == card.instanceId
+                                                  ? _feedbackMessage
+                                                  : null,
+                                          feedbackToken: _feedbackToken,
+                                          floatLabel:
+                                              _cardFloatLabels[card.instanceId],
+                                          floatToken: _cardFloatTokens[
+                                                  card.instanceId] ??
+                                              0,
+                                          activatable: activatableIds
+                                              .contains(card.instanceId),
+                                          validTarget: validTargetIds
+                                              .contains(card.instanceId),
+                                          onTap: () => _playHandCard(card));
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text('Main — touchez une carte pour la jouer',
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall),
+                              ],
+                            ),
                           ),
                         ),
-                        const SizedBox(height: 6),
-                        Text('Main — touchez une carte pour la jouer',
-                            style: Theme.of(context).textTheme.bodySmall),
-                      ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+              if (_savingResult)
+                const Positioned.fill(
+                  child: ColoredBox(
+                    color: Color(0xAA000000),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CircularProgressIndicator(),
+                          SizedBox(height: 16),
+                          Text('Enregistrement du résultat…'),
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
-          ),
-          if (_savingResult)
-            const Positioned.fill(
-              child: ColoredBox(
-                color: Color(0xAA000000),
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 16),
-                      Text('Enregistrement du résultat…'),
-                    ],
+              Positioned(
+                top: 22,
+                left: 24,
+                right: 24,
+                child: IgnorePointer(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    child: _momentBanner == null
+                        ? const SizedBox.shrink()
+                        : _MomentBanner(
+                            key: ValueKey(
+                              '${_momentBanner!.label}-${_momentBanner.hashCode}',
+                            ),
+                            data: _momentBanner!,
+                          ),
                   ),
                 ),
               ),
-            ),
-          Positioned(
-            top: 22,
-            left: 24,
-            right: 24,
-            child: IgnorePointer(
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 220),
-                child: _momentBanner == null
-                    ? const SizedBox.shrink()
-                    : _MomentBanner(
-                        key: ValueKey(
-                          '${_momentBanner!.label}-${_momentBanner.hashCode}',
-                        ),
-                        data: _momentBanner!,
-                      ),
-              ),
-            ),
-          ),
-          Positioned(
-            left: 24,
-            right: 24,
-            bottom: 170,
-            child: IgnorePointer(
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 180),
-                child: _hudMessage == null
-                    ? const SizedBox.shrink()
-                    : _HudFeedback(
-                        key: ValueKey(_hudMessage),
-                        message: _hudMessage!,
-                        isError: _hudIsError,
-                      ),
-              ),
-            ),
-          ),
-          for (final event in _overlayEvents)
-            Positioned.fill(
-              child: IgnorePointer(
-                child: _BattleEventOverlay(
-                  key: ValueKey('battle-event-${event.serial}'),
-                  event: event,
+              Positioned(
+                left: 24,
+                right: 24,
+                bottom: 170,
+                child: IgnorePointer(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 180),
+                    child: _hudMessage == null
+                        ? const SizedBox.shrink()
+                        : _HudFeedback(
+                            key: ValueKey(_hudMessage),
+                            message: _hudMessage!,
+                            isError: _hudIsError,
+                          ),
+                  ),
                 ),
               ),
-            ),
-          if (_duel.awaitingPlayerPriority)
-            Positioned(
-              right: 18,
-              bottom: 18,
-              child: SafeArea(
-                child: _ChainPassButton(
-                  hasActivations: activatableIds.isNotEmpty,
-                  onPressed: _passChainPriority,
+              for (final event in _overlayEvents)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: _BattleEventOverlay(
+                      key: ValueKey('battle-event-${event.serial}'),
+                      event: event,
+                      paused: _presentation.isPaused,
+                      spotlightDuration: _activeSpotlightDuration,
+                    ),
+                  ),
                 ),
-              ),
-            ),
-        ],
-      ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -1299,40 +1516,116 @@ class _PlayerStatus extends StatelessWidget {
                     ),
                   ]
                 : const []),
-        child: Row(children: [
-          AnimatedOpacity(
-            duration: const Duration(milliseconds: 220),
-            opacity: isActive ? 1 : .18,
-            child: const Icon(Icons.adjust, size: 16, color: Color(0xFF8BFFD9)),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          CircleAvatar(
+            radius: 21,
+            backgroundColor:
+                isActive ? const Color(0xFF813CD0) : const Color(0xFF292033),
+            child: Icon(name == 'Vous' ? Icons.person : Icons.psychology,
+                color: const Color(0xFFE6C5FF)),
           ),
-          const SizedBox(width: 7),
+          const SizedBox(width: 10),
           Expanded(
-              child: Text(name,
-                  style: const TextStyle(fontWeight: FontWeight.bold))),
-          const Icon(Icons.favorite, size: 18, color: Color(0xFFFF6B6B)),
-          Text(' $lifePoints PV'),
-          const SizedBox(width: 14),
-          Text(
-              'Main $handCount  •  Deck $deckCount  •  Cimetière $graveyardCount')
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                Row(children: [
+                  AnimatedOpacity(
+                    duration: const Duration(milliseconds: 220),
+                    opacity: isActive ? 1 : .18,
+                    child: const Icon(Icons.adjust,
+                        size: 14, color: Color(0xFF8BFFD9)),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                  const SizedBox(width: 6),
+                  const Icon(Icons.favorite,
+                      size: 16, color: Color(0xFFFF6B6B)),
+                  Text(' $lifePoints PV',
+                      maxLines: 1,
+                      style: const TextStyle(fontWeight: FontWeight.w800)),
+                ]),
+                const SizedBox(height: 4),
+                ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: LinearProgressIndicator(
+                      minHeight: 8,
+                      value: (lifePoints / 8000).clamp(0, 1),
+                      color: name == 'Vous'
+                          ? const Color(0xFF1F88F5)
+                          : const Color(0xFFE33C58),
+                      backgroundColor: const Color(0xFF29162F),
+                    )),
+                const SizedBox(height: 7),
+                Row(children: [
+                  Expanded(
+                    child: _StatusMetric(
+                        icon: Icons.style_rounded,
+                        label: 'Main',
+                        value: handCount),
+                  ),
+                  Expanded(
+                    child: _StatusMetric(
+                        icon: Icons.layers_rounded,
+                        label: 'Deck',
+                        value: deckCount),
+                  ),
+                  Expanded(
+                    child: _StatusMetric(
+                        icon: Icons.delete_outline_rounded,
+                        label: 'Cimetière',
+                        value: graveyardCount),
+                  ),
+                ]),
+              ])),
         ]),
       );
 }
 
+class _StatusMetric extends StatelessWidget {
+  const _StatusMetric(
+      {required this.icon, required this.label, required this.value});
+
+  final IconData icon;
+  final String label;
+  final int value;
+
+  @override
+  Widget build(BuildContext context) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: const Color(0xFFCDA8E8)),
+          const SizedBox(width: 3),
+          Flexible(
+            child: Text('$label $value',
+                maxLines: 1,
+                overflow: TextOverflow.fade,
+                softWrap: false,
+                style: const TextStyle(fontSize: 11, color: Color(0xFFE0CCE9))),
+          ),
+        ],
+      );
+}
+
 class _PhaseBar extends StatelessWidget {
-  const _PhaseBar(
-      {required this.phase,
-      required this.turn,
-      required this.aiPlaying,
-      required this.onNext});
+  const _PhaseBar({required this.phase, required this.turn});
   final DuelPhase phase;
   final int turn;
-  final bool aiPlaying;
-  final VoidCallback? onNext;
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 360;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      key: const Key('battle-top-phase-bar'),
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 6 : 10,
+        vertical: 7,
+      ),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: .28),
         borderRadius: BorderRadius.circular(18),
@@ -1341,41 +1634,216 @@ class _PhaseBar extends StatelessWidget {
       child: Row(
         children: [
           Container(
-            width: 34,
-            height: 34,
+            constraints: BoxConstraints(minWidth: compact ? 48 : 58),
+            height: compact ? 30 : 34,
+            padding: EdgeInsets.symmetric(horizontal: compact ? 5 : 7),
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
               color: Colors.white.withValues(alpha: .08),
+              borderRadius: BorderRadius.circular(17),
             ),
-            child: Text('$turn',
-                style: const TextStyle(fontWeight: FontWeight.w800)),
+            child: Text('Tour $turn',
+                maxLines: 1,
+                style:
+                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
           ),
-          const SizedBox(width: 10),
+          SizedBox(width: compact ? 4 : 10),
           Expanded(
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                for (final candidate in DuelPhase.values)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 3),
-                    child: _PhaseDot(
-                      visual: _PhaseVisual.of(candidate),
-                      active: candidate == phase,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  for (final candidate in DuelPhase.values)
+                    Padding(
+                      padding:
+                          EdgeInsets.symmetric(horizontal: compact ? 1 : 3),
+                      child: _PhaseDot(
+                        visual: _PhaseVisual.of(candidate),
+                        active: candidate == phase,
+                        compact: compact,
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
-          ),
-          IconButton.filledTonal(
-            tooltip: 'Phase suivante',
-            onPressed: aiPlaying ? null : onNext,
-            icon: const Icon(Icons.skip_next_rounded),
           ),
         ],
       ),
     );
   }
+}
+
+class _PlayerTurnControl extends StatelessWidget {
+  const _PlayerTurnControl({
+    required this.phase,
+    required this.deckCount,
+    required this.playerTurn,
+    required this.openingDrawSkipped,
+    required this.aiPlaying,
+    required this.awaitingPriority,
+    required this.hasActivations,
+    required this.onNextPhase,
+    required this.onPassPriority,
+  });
+
+  final DuelPhase phase;
+  final int deckCount;
+  final bool playerTurn;
+  final bool openingDrawSkipped;
+  final bool aiPlaying;
+  final bool awaitingPriority;
+  final bool hasActivations;
+  final VoidCallback onNextPhase;
+  final VoidCallback onPassPriority;
+
+  @override
+  Widget build(BuildContext context) {
+    if (awaitingPriority) {
+      return _ChainPassButton(
+        hasActivations: hasActivations,
+        onPressed: onPassPriority,
+      );
+    }
+    if (!playerTurn) return const SizedBox(width: 48, height: 48);
+    if (phase == DuelPhase.draw) {
+      return _DrawPileButton(
+        count: deckCount,
+        openingDrawSkipped: openingDrawSkipped,
+        onPressed: aiPlaying ? null : onNextPhase,
+      );
+    }
+    return IconButton.filledTonal(
+      key: const Key('battle-next-phase'),
+      tooltip: 'Passer à la phase suivante',
+      onPressed: aiPlaying ? null : onNextPhase,
+      icon: const Icon(Icons.skip_next_rounded),
+    );
+  }
+}
+
+class _DrawPileButton extends StatelessWidget {
+  const _DrawPileButton({
+    required this.count,
+    required this.openingDrawSkipped,
+    required this.onPressed,
+  });
+
+  final int count;
+  final bool openingDrawSkipped;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final tooltip = openingDrawSkipped
+        ? 'Passer la pioche du premier tour'
+        : 'Piocher une carte — $count restantes';
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        button: true,
+        label: tooltip,
+        child: SizedBox(
+          key: const Key('battle-draw-pile'),
+          width: 47,
+          height: 50,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                right: 0,
+                top: 1,
+                child: _DrawPileCard(
+                  color: const Color(0xFF3A1B58),
+                  borderColor: const Color(0xFF7948A4),
+                ),
+              ),
+              Positioned(
+                right: 3,
+                top: 3,
+                child: _DrawPileCard(
+                  color: const Color(0xFF4D206F),
+                  borderColor: const Color(0xFF9B5AC9),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                bottom: 0,
+                child: Material(
+                  color: const Color(0xFF241036),
+                  borderRadius: BorderRadius.circular(6),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: onPressed,
+                    child: Container(
+                      width: 37,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: onPressed == null
+                              ? Colors.white24
+                              : const Color(0xFFC66CFF),
+                          width: 1.5,
+                        ),
+                        boxShadow: onPressed == null
+                            ? null
+                            : const [
+                                BoxShadow(
+                                  color: Color(0x779D43E8),
+                                  blurRadius: 9,
+                                ),
+                              ],
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            openingDrawSkipped
+                                ? Icons.skip_next_rounded
+                                : Icons.style_rounded,
+                            size: 15,
+                            color: const Color(0xFFE8C9FF),
+                          ),
+                          Text(
+                            '$count',
+                            key: const Key('battle-draw-pile-count'),
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DrawPileCard extends StatelessWidget {
+  const _DrawPileCard({required this.color, required this.borderColor});
+
+  final Color color;
+  final Color borderColor;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 37,
+        height: 46,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: borderColor),
+        ),
+      );
 }
 
 final class _PhaseVisual {
@@ -1404,16 +1872,21 @@ final class _PhaseVisual {
 }
 
 class _PhaseDot extends StatelessWidget {
-  const _PhaseDot({required this.visual, required this.active});
+  const _PhaseDot({
+    required this.visual,
+    required this.active,
+    required this.compact,
+  });
 
   final _PhaseVisual visual;
   final bool active;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) => AnimatedContainer(
         duration: const Duration(milliseconds: 260),
-        width: active ? 35 : 25,
-        height: active ? 35 : 25,
+        width: active ? (compact ? 29 : 35) : (compact ? 21 : 25),
+        height: active ? (compact ? 29 : 35) : (compact ? 21 : 25),
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: visual.color.withValues(alpha: active ? .92 : .12),
@@ -1432,7 +1905,7 @@ class _PhaseDot extends StatelessWidget {
         ),
         child: Icon(
           visual.icon,
-          size: active ? 19 : 13,
+          size: active ? (compact ? 16 : 19) : (compact ? 11 : 13),
           color: active ? Colors.white : Colors.white54,
         ),
       );
@@ -1636,7 +2109,15 @@ class _ChainResolutionIndicator extends StatelessWidget {
       );
 }
 
-enum _BattleOverlayKind { impact, life, destruction, mythic }
+enum _BattleOverlayKind {
+  impact,
+  life,
+  destruction,
+  mythic,
+  cardPlayed,
+  effectActivated,
+  attackSource,
+}
 
 final class _BattleOverlayEvent {
   const _BattleOverlayEvent._({
@@ -1646,6 +2127,9 @@ final class _BattleOverlayEvent {
     this.forPlayer,
     this.label,
     this.direct,
+    this.cardCode,
+    this.cardInstanceId,
+    this.hidden = false,
   });
 
   factory _BattleOverlayEvent.life({
@@ -1690,40 +2174,353 @@ final class _BattleOverlayEvent {
         label: label,
       );
 
+  factory _BattleOverlayEvent.cardPlayed({
+    required int serial,
+    required String cardInstanceId,
+    required String cardCode,
+    required String label,
+    required bool forPlayer,
+    required bool hidden,
+  }) =>
+      _BattleOverlayEvent._(
+        serial: serial,
+        kind: _BattleOverlayKind.cardPlayed,
+        cardInstanceId: cardInstanceId,
+        cardCode: cardCode,
+        label: label,
+        forPlayer: forPlayer,
+        hidden: hidden,
+      );
+
+  factory _BattleOverlayEvent.effectActivated({
+    required int serial,
+    required String cardInstanceId,
+    required String cardCode,
+    required String label,
+    required bool forPlayer,
+  }) =>
+      _BattleOverlayEvent._(
+        serial: serial,
+        kind: _BattleOverlayKind.effectActivated,
+        cardInstanceId: cardInstanceId,
+        cardCode: cardCode,
+        label: label,
+        forPlayer: forPlayer,
+      );
+
+  factory _BattleOverlayEvent.attackSource({
+    required int serial,
+    required String cardInstanceId,
+    required String cardCode,
+    required String label,
+    required bool forPlayer,
+  }) =>
+      _BattleOverlayEvent._(
+        serial: serial,
+        kind: _BattleOverlayKind.attackSource,
+        cardInstanceId: cardInstanceId,
+        cardCode: cardCode,
+        label: label,
+        forPlayer: forPlayer,
+      );
+
   final int serial;
   final _BattleOverlayKind kind;
   final int? amount;
   final bool? forPlayer;
   final String? label;
   final bool? direct;
+  final String? cardCode;
+  final String? cardInstanceId;
+  final bool hidden;
+
+  bool get isCardSpotlight => const {
+        _BattleOverlayKind.cardPlayed,
+        _BattleOverlayKind.effectActivated,
+        _BattleOverlayKind.attackSource,
+      }.contains(kind);
 }
 
 class _BattleEventOverlay extends StatelessWidget {
-  const _BattleEventOverlay({required this.event, super.key});
+  const _BattleEventOverlay(
+      {required this.event,
+      required this.paused,
+      required this.spotlightDuration,
+      super.key});
 
   final _BattleOverlayEvent event;
+  final bool paused;
+  final Duration spotlightDuration;
 
   @override
   Widget build(BuildContext context) => switch (event.kind) {
-        _BattleOverlayKind.impact => _ImpactFlash(event: event),
-        _BattleOverlayKind.life => _LifeFloat(event: event),
-        _BattleOverlayKind.destruction => _DestructionFloat(event: event),
-        _BattleOverlayKind.mythic => _MythicFlash(event: event),
+        _BattleOverlayKind.impact => _ImpactFlash(event: event, paused: paused),
+        _BattleOverlayKind.life => _LifeFloat(event: event, paused: paused),
+        _BattleOverlayKind.destruction =>
+          _DestructionFloat(event: event, paused: paused),
+        _BattleOverlayKind.mythic => _MythicFlash(event: event, paused: paused),
+        _BattleOverlayKind.cardPlayed => _CardSourceSpotlight(
+            event: event,
+            paused: paused,
+            duration: spotlightDuration,
+            mode: _CardSpotlightMode.played,
+          ),
+        _BattleOverlayKind.effectActivated => _CardSourceSpotlight(
+            event: event,
+            paused: paused,
+            duration: spotlightDuration,
+            mode: _CardSpotlightMode.effect,
+          ),
+        _BattleOverlayKind.attackSource => _CardSourceSpotlight(
+            event: event,
+            paused: paused,
+            duration: spotlightDuration,
+            mode: _CardSpotlightMode.attack,
+          ),
       };
 }
 
-class _ImpactFlash extends StatelessWidget {
-  const _ImpactFlash({required this.event});
+enum _CardSpotlightMode { played, effect, attack }
+
+class _CardSourceSpotlight extends StatelessWidget {
+  const _CardSourceSpotlight(
+      {required this.event,
+      required this.mode,
+      required this.paused,
+      required this.duration});
 
   final _BattleOverlayEvent event;
+  final _CardSpotlightMode mode;
+  final bool paused;
+  final Duration duration;
+
+  @override
+  Widget build(BuildContext context) {
+    final visual = switch (mode) {
+      _CardSpotlightMode.played => (
+          label: event.hidden ? 'CARTE POSÉE' : 'CARTE JOUÉE',
+          color: const Color(0xFFAE65FF),
+          icon: Icons.style_rounded,
+          keyPrefix: 'battle-card-played',
+        ),
+      _CardSpotlightMode.effect => (
+          label: 'EFFET ACTIVÉ',
+          color: const Color(0xFF55E6FF),
+          icon: Icons.bolt_rounded,
+          keyPrefix: 'battle-effect-source',
+        ),
+      _CardSpotlightMode.attack => (
+          label: 'ATTAQUE',
+          color: const Color(0xFFFF704D),
+          icon: Icons.flash_on_rounded,
+          keyPrefix: 'battle-attack-source',
+        ),
+    };
+    final belongsToPlayer = event.forPlayer ?? true;
+    return BattlePausableAnimation(
+      key: Key('${visual.keyPrefix}-${event.cardInstanceId}'),
+      paused: paused,
+      duration: duration,
+      builder: (context, value, child) {
+        // Enter briefly, HOLD fully readable, then move away. Previously a
+        // single sine curve made the enlarged card look like a blinking flash.
+        final entrance =
+            Curves.easeOutCubic.transform((value / .15).clamp(0, 1));
+        final exit =
+            Curves.easeInCubic.transform(((value - .78) / .22).clamp(0, 1));
+        final opacity = entrance * (1 - exit);
+        final direction = mode == _CardSpotlightMode.played
+            ? (belongsToPlayer ? 1.0 : -1.0)
+            : (belongsToPlayer ? -1.0 : 1.0);
+        final offset = switch (mode) {
+          _CardSpotlightMode.played => Offset(
+              0,
+              direction * (145 * exit + 35 * (1 - entrance)),
+            ),
+          _CardSpotlightMode.effect => Offset(
+              0,
+              direction * 22 * exit,
+            ),
+          _CardSpotlightMode.attack => Offset(
+              0,
+              direction * 105 * exit,
+            ),
+        };
+        final scale = switch (mode) {
+          _CardSpotlightMode.played => .72 + .34 * entrance - .34 * exit,
+          _CardSpotlightMode.effect => .8 + .25 * entrance - .25 * exit,
+          _CardSpotlightMode.attack => .78 + .3 * entrance - .1 * exit,
+        };
+        return Opacity(
+          opacity: opacity,
+          child: Transform.translate(
+            offset: offset,
+            child: Transform.scale(scale: scale, child: child),
+          ),
+        );
+      },
+      child: Center(
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(
+              width: 230,
+              height: 300,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  colors: [
+                    visual.color.withValues(alpha: .5),
+                    visual.color.withValues(alpha: .08),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
+            Container(
+              width: 154,
+              padding: const EdgeInsets.all(7),
+              decoration: BoxDecoration(
+                color: const Color(0xF20C0818),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: visual.color, width: 2.2),
+                boxShadow: [
+                  BoxShadow(
+                    color: visual.color.withValues(alpha: .72),
+                    blurRadius: mode == _CardSpotlightMode.effect ? 34 : 24,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AspectRatio(
+                    aspectRatio: .72,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: event.hidden
+                          ? const _MysticCardBack()
+                          : _BattleSpotlightArtwork(code: event.cardCode!),
+                    ),
+                  ),
+                  const SizedBox(height: 7),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(visual.icon, size: 16, color: visual.color),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          visual.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: visual.color,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: .8,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    belongsToPlayer ? 'VOUS' : 'ADVERSAIRE',
+                    style: TextStyle(
+                      color: visual.color.withValues(alpha: .82),
+                      fontSize: 9,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.1,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    event.hidden ? 'Carte adverse' : event.label!,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BattleSpotlightArtwork extends StatelessWidget {
+  const _BattleSpotlightArtwork({required this.code});
+
+  final String code;
+
+  @override
+  Widget build(BuildContext context) => Image.asset(
+        'assets/images/cards/${code.toLowerCase()}.png',
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFF3A1463), Color(0xFF10091F)],
+            ),
+          ),
+          child: const Center(
+            child: Icon(
+              Icons.auto_awesome,
+              color: Color(0xFFDCA9FF),
+              size: 48,
+            ),
+          ),
+        ),
+      );
+}
+
+class _MysticCardBack extends StatelessWidget {
+  const _MysticCardBack();
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF5D2095), Color(0xFF160925), Color(0xFF321058)],
+          ),
+          border: Border.all(color: const Color(0xFFC77DFF), width: 2),
+        ),
+        child: const Center(
+          child: Icon(
+            Icons.auto_awesome,
+            color: Color(0xFFE9C8FF),
+            size: 54,
+            shadows: [Shadow(color: Color(0xFFC26BFF), blurRadius: 22)],
+          ),
+        ),
+      );
+}
+
+class _ImpactFlash extends StatelessWidget {
+  const _ImpactFlash({required this.event, required this.paused});
+
+  final _BattleOverlayEvent event;
+  final bool paused;
 
   @override
   Widget build(BuildContext context) => Align(
         alignment: event.direct! ? const Alignment(0, -.76) : Alignment.center,
-        child: TweenAnimationBuilder<double>(
+        child: BattlePausableAnimation(
           key: const Key('battle-attack-impact'),
-          duration: const Duration(milliseconds: 430),
-          tween: Tween(begin: 0, end: 1),
+          paused: paused,
+          duration: const Duration(milliseconds: 1000),
           builder: (context, value, child) => Opacity(
             opacity: math.sin(value * math.pi).clamp(0, 1).toDouble(),
             child: Transform.scale(
@@ -1742,9 +2539,10 @@ class _ImpactFlash extends StatelessWidget {
 }
 
 class _LifeFloat extends StatelessWidget {
-  const _LifeFloat({required this.event});
+  const _LifeFloat({required this.event, required this.paused});
 
   final _BattleOverlayEvent event;
+  final bool paused;
 
   @override
   Widget build(BuildContext context) {
@@ -1752,10 +2550,10 @@ class _LifeFloat extends StatelessWidget {
     return Align(
       alignment:
           event.forPlayer! ? const Alignment(0, .62) : const Alignment(0, -.78),
-      child: TweenAnimationBuilder<double>(
+      child: BattlePausableAnimation(
         key: const Key('battle-life-float'),
-        duration: const Duration(milliseconds: 650),
-        tween: Tween(begin: 0, end: 1),
+        paused: paused,
+        duration: const Duration(milliseconds: 1300),
         builder: (context, value, child) => Opacity(
           opacity: (1 - value).clamp(0, 1),
           child: Transform.translate(
@@ -1779,16 +2577,17 @@ class _LifeFloat extends StatelessWidget {
 }
 
 class _DestructionFloat extends StatelessWidget {
-  const _DestructionFloat({required this.event});
+  const _DestructionFloat({required this.event, required this.paused});
 
   final _BattleOverlayEvent event;
+  final bool paused;
 
   @override
   Widget build(BuildContext context) => Center(
-        child: TweenAnimationBuilder<double>(
+        child: BattlePausableAnimation(
           key: const Key('battle-destruction-float'),
-          duration: const Duration(milliseconds: 560),
-          tween: Tween(begin: 0, end: 1),
+          paused: paused,
+          duration: const Duration(milliseconds: 1100),
           builder: (context, value, child) => Opacity(
             opacity: (1 - value).clamp(0, 1),
             child: Transform.translate(
@@ -1825,15 +2624,16 @@ class _DestructionFloat extends StatelessWidget {
 }
 
 class _MythicFlash extends StatelessWidget {
-  const _MythicFlash({required this.event});
+  const _MythicFlash({required this.event, required this.paused});
 
   final _BattleOverlayEvent event;
+  final bool paused;
 
   @override
-  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+  Widget build(BuildContext context) => BattlePausableAnimation(
         key: const Key('battle-mythic-flash'),
-        duration: const Duration(milliseconds: 620),
-        tween: Tween(begin: 0, end: 1),
+        paused: paused,
+        duration: const Duration(milliseconds: 1300),
         builder: (context, value, child) => DecoratedBox(
           decoration: BoxDecoration(
             gradient: RadialGradient(
@@ -2227,7 +3027,8 @@ class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
                             'assets/images/cards/${widget.presentation.code.toUpperCase()}.png',
                             fit: BoxFit.cover,
                             errorBuilder: (_, __, ___) => const Center(
-                              child: Icon(Icons.auto_awesome, color: Colors.white24),
+                              child: Icon(Icons.auto_awesome,
+                                  color: Colors.white24),
                             ),
                           ),
                         ),
@@ -2236,7 +3037,11 @@ class _DuelCardState extends State<_DuelCard> with TickerProviderStateMixin {
                             gradient: LinearGradient(
                               begin: Alignment.topCenter,
                               end: Alignment.bottomCenter,
-                              colors: [Colors.black87, Colors.transparent, Colors.black87],
+                              colors: [
+                                Colors.black87,
+                                Colors.transparent,
+                                Colors.black87
+                              ],
                               stops: [0, .45, 1],
                             ),
                           ),

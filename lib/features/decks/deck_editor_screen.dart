@@ -132,11 +132,24 @@ class _DeckEditorScreenState extends State<DeckEditorScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
+        backgroundColor: const Color(0xFF070814),
         appBar: AppBar(
+          backgroundColor: const Color(0xFF090A18),
+          surfaceTintColor: Colors.transparent,
           title: Text(
-              widget.deckId == null ? 'Nouveau deck V2' : 'Éditeur de deck V2'),
+              widget.deckId == null ? 'NOUVEAU DECK' : 'ÉDITEUR DE DECK',
+              style: const TextStyle(fontWeight: FontWeight.w900)),
         ),
-        body: _buildBody(),
+        body: DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment(0, -.9),
+              radius: 1.5,
+              colors: [Color(0xFF251047), Color(0xFF070814)],
+            ),
+          ),
+          child: _buildBody(),
+        ),
       );
 
   Widget _buildBody() {
@@ -150,6 +163,7 @@ class _DeckEditorScreenState extends State<DeckEditorScreen> {
       length: 2,
       child: Column(
         children: [
+          const _EditorSteps(),
           _DeckSummary(
             draft: draft,
             nameController: _nameController,
@@ -194,6 +208,53 @@ class _DeckEditorScreenState extends State<DeckEditorScreen> {
   }
 }
 
+class _EditorSteps extends StatelessWidget {
+  const _EditorSteps();
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.fromLTRB(14, 12, 14, 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: const Color(0xD9121222),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFF453052)),
+        ),
+        child: const Row(children: [
+          _StepBadge(number: '1', label: 'INFOS', active: true),
+          Expanded(child: Divider()),
+          _StepBadge(number: '2', label: 'CARTES', active: true),
+          Expanded(child: Divider()),
+          _StepBadge(number: '3', label: 'STRATÉGIE'),
+          Expanded(child: Divider()),
+          _StepBadge(number: '4', label: 'APERÇU'),
+        ]),
+      );
+}
+
+class _StepBadge extends StatelessWidget {
+  const _StepBadge(
+      {required this.number, required this.label, this.active = false});
+  final String number;
+  final String label;
+  final bool active;
+  @override
+  Widget build(BuildContext context) =>
+      Row(mainAxisSize: MainAxisSize.min, children: [
+        CircleAvatar(
+            radius: 15,
+            backgroundColor:
+                active ? const Color(0xFF873BD1) : const Color(0xFF222232),
+            child: Text(number, style: const TextStyle(fontSize: 12))),
+        const SizedBox(width: 6),
+        Text(label,
+            style: TextStyle(
+                fontSize: 11,
+                color: active
+                    ? const Color(0xFFE1B5FF)
+                    : const Color(0xFF8F879A))),
+      ]);
+}
+
 class _DeckSummary extends StatelessWidget {
   const _DeckSummary({
     required this.draft,
@@ -219,8 +280,13 @@ class _DeckSummary extends StatelessWidget {
   Widget build(BuildContext context) {
     final distribution = draft.categoryDistribution.entries.toList()
       ..sort((left, right) => left.key.compareTo(right.key));
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
+    return Container(
+      margin: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xE8111220),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFF493258)),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
@@ -233,6 +299,8 @@ class _DeckSummary extends StatelessWidget {
               onChanged: onNameChanged,
               decoration: InputDecoration(
                 labelText: 'Nom du deck',
+                prefixIcon:
+                    const Icon(Icons.auto_awesome, color: Color(0xFFBC62F6)),
                 errorText: showNameError ? 'Donnez un nom au deck.' : null,
                 border: const OutlineInputBorder(),
                 counterText: '',

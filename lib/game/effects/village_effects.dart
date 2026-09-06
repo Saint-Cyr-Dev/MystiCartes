@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import '../battle_state.dart';
 import '../card.dart';
 import '../duel_engine.dart';
@@ -58,6 +59,7 @@ typedef _PendingEvents = Iterable<PendingDuelEvent> Function(
 
 final class _Effect extends ChainEffectDefinition {
   const _Effect({
+    this.onManualActivations,
     this.can,
     this.cost,
     this.legal,
@@ -69,6 +71,12 @@ final class _Effect extends ChainEffectDefinition {
   final _Predicate? legal;
   final _PendingEvents? events;
   final _Reducer effect;
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
+
   @override
   bool canActivate(DuelState state, ChainLink link) =>
       can?.call(state, link) ?? true;
@@ -319,6 +327,18 @@ final class VillageEffectRegistry {
   static ChainEffectDefinition _vil009() {
     const usage = '${VillageEffectKeys.vil009}:peek';
     return _Effect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final option = request.option;
+        for (final target
+            in ownCharacters.where((c) => c.hasFamily('village'))) {
+          yield option(
+              target: ChainTarget(cardInstanceId: target.instanceId),
+              payload: {'mode': 'equip'},
+              description: 'Équiper ${target.cardCode}',
+              suffix: target.instanceId);
+        }
+      },
       can: (state, link) {
         final source = _source(state, link);
         if (source?.cardCode != 'VIL-009') return false;
@@ -398,6 +418,26 @@ final class VillageEffectRegistry {
       );
 
   static ChainEffectDefinition _vil011() => _Effect(
+        onManualActivations: (request) sync* {
+          final ownCharacters = request.ownCharacters;
+          final attack = request.attack;
+          final option = request.option;
+          if (attack != null) {
+            final target = ownCharacters
+                .where((c) =>
+                    c.instanceId == attack.targetInstanceId &&
+                    c.hasFamily('village') &&
+                    c.position == BattlePosition.defense)
+                .firstOrNull;
+            if (target != null) {
+              yield option(
+                  target: ChainTarget(cardInstanceId: target.instanceId),
+                  payload: {'trigger': 'village_defender_attacked'},
+                  description: 'Renforcer ${target.cardCode}',
+                  suffix: target.instanceId);
+            }
+          }
+        },
         can: (state, link) =>
             _sourceCode(state, link, 'VIL-011') &&
             link.payload['trigger'] == 'village_defender_attacked',
@@ -422,6 +462,27 @@ final class VillageEffectRegistry {
       );
 
   static ChainEffectDefinition _vil012() => _Effect(
+        onManualActivations: (request) sync* {
+          final effectiveContext = request.context;
+          final last = request.last;
+          final option = request.option;
+          if (last != null) {
+            final destruction =
+                effectiveContext.firstEvent<EffectDestructionPending>();
+            final banishment = effectiveContext.firstEvent<BanishmentPending>();
+            final equipmentId = destruction?.cardInstanceId ??
+                banishment?.cardInstanceId ??
+                last.target?.cardInstanceId ??
+                last.payload['equipment_instance_id'] as String?;
+            if (equipmentId != null) {
+              yield option(payload: {
+                'trigger': 'equipment_would_be_destroyed_or_banished',
+                'target_link_id': last.linkId,
+                'equipment_instance_id': equipmentId
+              }, description: 'Protéger l’Équipement', suffix: last.linkId);
+            }
+          }
+        },
         events: (state, link) {
           final id = _targetLink(state, link)?.sourceCardInstanceId;
           return id == null

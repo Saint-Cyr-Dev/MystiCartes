@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'app/app_routes.dart';
+import 'app/mystic_navigation.dart';
 import 'game/ai/ai_strategy.dart';
 import 'features/auth/auth_screen.dart';
 import 'features/auth/auth_session_preferences.dart';
@@ -17,6 +18,7 @@ import 'features/collection/collection_screen.dart';
 import 'features/decks/decks_screen.dart';
 import 'features/home/home_screen.dart';
 import 'features/settings/settings_screen.dart';
+import 'features/shop/shop_screen.dart';
 
 const _supabaseUrl = String.fromEnvironment('SUPABASE_URL');
 const _supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
@@ -83,10 +85,9 @@ class MystiCartesApp extends StatelessWidget {
         AppRoutes.decks => localDemoMode
             ? const _OnlineFeatureScreen(feature: 'Mes decks')
             : const DecksScreen(),
-        AppRoutes.battle => localDemoMode
-            ? const BattleScreen.local()
-            : const BattleLaunchScreen(),
-        AppRoutes.settings => const SettingsScreen(),
+        AppRoutes.shop => const ShopScreen(),
+        AppRoutes.battle => BattleLaunchScreen(localDemoMode: localDemoMode),
+        AppRoutes.settings => SettingsScreen(localDemoMode: localDemoMode),
         _ => localDemoMode
             ? const HomeScreen(localDemoMode: true)
             : const _UnknownRouteScreen(),
@@ -117,6 +118,11 @@ class _OnlineFeatureScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: Text(feature)),
+        bottomNavigationBar: MysticBottomNavigation(
+          currentRoute: feature == 'Bibliothèque'
+              ? AppRoutes.collection
+              : AppRoutes.decks,
+        ),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),

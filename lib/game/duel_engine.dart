@@ -1,3 +1,4 @@
+import 'effects/manual_activation_options.dart';
 import 'battle_state.dart';
 import 'card.dart';
 import 'duel_types.dart';
@@ -58,6 +59,11 @@ enum DuelActionFailure {
 /// l'activation puis à la résolution, et [resolve] applique l'effet.
 abstract class ChainEffectDefinition {
   const ChainEffectDefinition();
+
+  /// Enumerates optional manual activations. Automatic effects expose none.
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      const [];
 
   ChainLink? createAutomaticTriggerLink({
     required DuelState state,
@@ -296,6 +302,9 @@ final class DuelEngine {
   static const int maximumHandSize = 6;
 
   final Map<String, ChainEffectDefinition> _chainEffects;
+
+  ChainEffectDefinition? chainEffectDefinition(String effectKey) =>
+      _chainEffects[effectKey];
   final CombatFlipTriggerLinkFactory? _combatFlipTriggerLinkFactory;
 
   /// Événements typés annoncés par le dernier maillon de la Chaîne.
@@ -723,8 +732,27 @@ final class DuelEngine {
     if (state.cancelledAttackDeclarationIds.contains(
       declaration.declarationId,
     )) {
+      // Une attaque annulée a tout de même été déclarée et consomme donc
+      // l'attaque du Personnage pour ce tour. Sans ce marquage, une IA pouvait
+      // redéclarer immédiatement la même attaque (avec le même declarationId),
+      // rouvrant indéfiniment la fenêtre de priorité.
+      final attackerEntry = _findCharacter(
+        _fieldFor(state, declaration.attackingPlayer),
+        declaration.attackerInstanceId,
+      );
+      final cancelledState = attackerEntry == null
+          ? state
+          : _replaceCharacterAt(
+              state,
+              declaration.attackingPlayer,
+              attackerEntry.index,
+              _copyFieldCard(
+                attackerEntry.card,
+                attackedThisTurn: true,
+              ),
+            );
       return CombatResolutionResult(
-        state: state,
+        state: cancelledState,
         status: CombatResolutionStatus.cancelled,
       );
     }

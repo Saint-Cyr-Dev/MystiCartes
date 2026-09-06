@@ -1,3 +1,4 @@
+import 'manual_activation_options.dart';
 import 'dart:math';
 
 import '../battle_state.dart';
@@ -82,6 +83,7 @@ typedef _PendingEventsCallback = Iterable<PendingDuelEvent> Function(
 
 final class _FunctionalAncetreEffect extends ChainEffectDefinition {
   const _FunctionalAncetreEffect({
+    this.onManualActivations,
     this.onCanActivate,
     this.onPayCost,
     this.onTargetLegal,
@@ -94,6 +96,12 @@ final class _FunctionalAncetreEffect extends ChainEffectDefinition {
   final _StateLinkPredicate? onTargetLegal;
   final _PendingEventsCallback? onPendingEvents;
   final _StateLinkReducer onResolve;
+
+  final ManualActivationBuilder? onManualActivations;
+  @override
+  Iterable<ManualActivationOption> buildManualActivations(
+          ManualActivationRequest request) =>
+      onManualActivations?.call(request) ?? const [];
 
   @override
   bool canActivate(DuelState state, ChainLink link) {
@@ -353,6 +361,21 @@ final class AncetreEffectRegistry {
 
   static ChainEffectDefinition _anc009() {
     return _FunctionalAncetreEffect(
+      onManualActivations: (request) sync* {
+        final ownCharacters = request.ownCharacters;
+        final enemyCharacters = request.enemyCharacters;
+        final option = request.option;
+        for (final ally in ownCharacters.where((c) => c.hasFamily('ancêtre'))) {
+          for (final foe in enemyCharacters) {
+            yield option(
+                target: ChainTarget(cardInstanceId: ally.instanceId),
+                payload: {'enemy_instance_id': foe.instanceId},
+                description:
+                    'Renforcer ${ally.cardCode} et affaiblir ${foe.cardCode}',
+                suffix: '${ally.instanceId}:${foe.instanceId}');
+          }
+        }
+      },
       onCanActivate: (state, link) => _sourceHasCode(state, link, 'ANC-009'),
       onTargetLegal: (state, link) {
         final ally = _findFieldCard(state, link.target?.cardInstanceId);
@@ -402,6 +425,25 @@ final class AncetreEffectRegistry {
     AncetreAncestralSummonExtension ancestralSummonExtension,
   ) {
     return _FunctionalAncetreEffect(
+      onManualActivations: (request) sync* {
+        final own = request.own;
+        final option = request.option;
+        final materials = own.graveyard
+            .where((card) =>
+                card.category == CardCategory.character &&
+                card.hasFamily('ancêtre'))
+            .toList(growable: false);
+        if (materials.fold<int>(0, (sum, card) => sum + (card.rank ?? 0)) >=
+            10) {
+          yield option(
+            payload: {
+              'banish_instance_ids':
+                  materials.map((card) => card.instanceId).toList(),
+            },
+            description: 'Bannir les matériaux Ancêtre du Cimetière',
+          );
+        }
+      },
       onCanActivate: _hasAncestralBanishMaterials,
       onPayCost: (state, link) => _banishGraveyardCards(
         state,
@@ -421,6 +463,27 @@ final class AncetreEffectRegistry {
 
   static ChainEffectDefinition _anc011() {
     return _FunctionalAncetreEffect(
+      onManualActivations: (request) sync* {
+        final effectiveContext = request.context;
+        final own = request.own;
+        final option = request.option;
+        final rank = effectiveContext.destroyedCharacterRank;
+        if (rank != null) {
+          for (final selected in own.graveyard.where((c) =>
+              c.category == CardCategory.character &&
+              c.hasFamily('ancêtre') &&
+              (c.rank ?? 99) < rank)) {
+            yield option(
+                payload: {
+                  'trigger': 'controlled_character_destroyed',
+                  'destroyed_rank': rank,
+                  'selected_instance_id': selected.instanceId
+                },
+                description: 'Invoquer ${selected.cardCode} du Cimetière',
+                suffix: selected.instanceId);
+          }
+        }
+      },
       onCanActivate: (state, link) {
         final destroyedRank = link.payload['destroyed_rank'] as int?;
         final selectedId = link.payload['selected_instance_id'] as String?;
@@ -450,6 +513,27 @@ final class AncetreEffectRegistry {
 
   static ChainEffectDefinition _anc012() {
     return _FunctionalAncetreEffect(
+      onManualActivations: (request) sync* {
+        final participant = request.participant;
+        final effectiveContext = request.context;
+        final own = request.own;
+        final last = request.last;
+        final option = request.option;
+        if (last != null && last.activatingPlayer != participant) {
+          final banishment = effectiveContext.firstEvent<BanishmentPending>();
+          final graveId = banishment?.fromGraveyard == true
+              ? banishment!.cardInstanceId
+              : last.target?.cardInstanceId ??
+                  last.payload['graveyard_instance_id'] as String?;
+          if (graveId != null &&
+              own.graveyard.any((c) => c.instanceId == graveId)) {
+            yield option(payload: {
+              'target_link_id': last.linkId,
+              'threatened_graveyard_instance_id': graveId,
+            }, description: 'Empêcher le bannissement', suffix: last.linkId);
+          }
+        }
+      },
       onPendingEvents: (state, link) {
         final id = _targetedChainLink(state, link)?.sourceCardInstanceId;
         return id == null

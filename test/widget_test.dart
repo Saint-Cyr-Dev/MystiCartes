@@ -22,10 +22,11 @@ void main() {
         AppRoutes.home,
         AppRoutes.collection,
         AppRoutes.decks,
+        AppRoutes.shop,
         AppRoutes.battle,
         AppRoutes.settings,
       },
-      hasLength(11),
+      hasLength(12),
     );
   });
 
